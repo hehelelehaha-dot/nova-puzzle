@@ -8,6 +8,11 @@
  * host.click() so every onclick, <summary> toggle and e.target stays exactly as before.
  * Needs Settings > Sounds & Haptics > System Haptics on.
  *
+ * A single finger tap can produce more than one click (the label, a forwarded switch click, a host.click()
+ * replay, and on iOS a delayed ~300ms click). After a tile is placed the board re-renders, so that delayed
+ * click can land on a different tile in the same spot. We act on the first trusted pointerup, then ignore
+ * further events at that point / pointer id for ~350ms. init() is idempotent and will not stack listeners.
+ *
  * Android Chrome: navigator.vibrate(8) on pointerdown, at most one pulse per 35 ms so quick taps stay crisp.
  */
 (function (w, d) {
@@ -15,12 +20,60 @@
   var TAP = 'button,[role="button"],summary,.tile';
   var SKIP = 'a,input,select,textarea,label,[contenteditable],[data-no-haptic],.lock';
   var LIFT = 'button,[role="button"],a,input,select,textarea,label,summary';
-  var MIN_GAP_MS = 35, PULSE_MS = 8;
-  var last = 0, mo = null, on = false;
+  var MIN_GAP_MS = 35, PULSE_MS = 8, LOCK_MS = 350, LOCK_DIST2 = 40 * 40;
+  var last = 0, mo = null, ro = null, on = false, replaying = false;
+  var locks = [];
   var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   var canVibrate = typeof navigator.vibrate === "function" && !isIOS;
 
   function enabled() { try { return localStorage.getItem("puzzle_haptics") !== "0"; } catch (e) { return true; } }
+
+  function pruneLocks(now) {
+    var i, next = [];
+    for (i = 0; i < locks.length; i++) if (now - locks[i].t < LOCK_MS) next.push(locks[i]);
+    locks = next;
+  }
+  function eventXY(e) {
+    if (e.clientX != null && e.clientY != null) return { x: e.clientX, y: e.clientY };
+    var t = (e.changedTouches && e.changedTouches[0]) || (e.touches && e.touches[0]);
+    return t ? { x: t.clientX, y: t.clientY } : { x: 0, y: 0 };
+  }
+  function recentlyHandled(e) {
+    var now = performance.now();
+    pruneLocks(now);
+    var xy = eventXY(e);
+    var pid = e.pointerId;
+    var i, l, dx, dy;
+    // Only key on screen position. pointerId is reused across distinct mouse
+    // clicks and sequential taps, so a pointerId lock would swallow the next
+    // real tap (e.g. unplace, then speaker) inside the 350ms window.
+    for (i = 0; i < locks.length; i++) {
+      l = locks[i];
+      dx = xy.x - l.x; dy = xy.y - l.y;
+      if (dx * dx + dy * dy < LOCK_DIST2) return true;
+    }
+    return false;
+  }
+  function markHandled(e) {
+    var xy = eventXY(e);
+    locks.push({ t: performance.now(), x: xy.x, y: xy.y, pointerId: e.pointerId });
+  }
+  /* A new finger/mouse down is a new gesture (e.g. toggling the speaker off).
+     Drop nearby locks so we don't treat it as the delayed ghost click. */
+  function onPointerDownClear(e) {
+    if (!on) return;
+    if (e.button != null && e.button !== 0) return;
+    var now = performance.now();
+    pruneLocks(now);
+    var xy = eventXY(e);
+    var next = [], i, l, dx, dy;
+    for (i = 0; i < locks.length; i++) {
+      l = locks[i];
+      dx = xy.x - l.x; dy = xy.y - l.y;
+      if (dx * dx + dy * dy >= LOCK_DIST2) next.push(l);
+    }
+    locks = next;
+  }
 
   /* Android */
   function onDown(e) {
@@ -31,22 +84,59 @@
     try { navigator.vibrate(PULSE_MS); } catch (err) {}
   }
 
-  /* iPhone */
-  function onClickCapture(e) {
-    var lab = e.target;
-    if (!lab || !lab.matches) return;
-    if (lab.matches("input[data-hx-sw]")) { e.stopImmediatePropagation(); return; }   // forwarded copy: app never sees it
-    if (!lab.matches("label[data-hx]")) return;
-    e.stopImmediatePropagation();                       // the trusted click still activates the label → switch → tick
-    var host = lab.parentElement;
-    if (host && !host.disabled) host.click();           // replay on the real control, same target as before
-    // The app may have rewritten the button (速度 1x → 0.85x) or the whole view during that click, which
-    // detaches our label. The switch toggle (the tick) runs after this dispatch, so put the label back first.
-    if (!lab.isConnected) {
-      if (host && host.isConnected && !host.querySelector(":scope > label[data-hx]")) host.appendChild(lab);
-      else { lab.style.cssText += ";position:fixed;left:-50px;top:0;width:1px;height:1px;opacity:0;pointer-events:none"; d.body.appendChild(lab); setTimeout(function () { lab.remove(); }, 400); }
-    }
+  function labelOf(t) {
+    if (!t || !t.closest) return null;
+    if (t.matches && t.matches("label[data-hx]")) return t;
+    return t.closest("label[data-hx]");
   }
+  function replay(host) {
+    if (!host || host.disabled) return;
+    // host.click() is synchronous; let that untrusted event reach the app,
+    // but keep swallowing later ghost clicks at the same spot.
+    replaying = true;
+    try { host.click(); }
+    finally { replaying = false; }
+  }
+
+  /* iPhone: act on the first trusted pointerup so we don't wait ~300ms for click. */
+  function onPointerUpCapture(e) {
+    if (!on) return;
+    var lab = labelOf(e.target);
+    if (!lab) return;
+    if (recentlyHandled(e)) return;
+    var host = lab.parentElement;
+    if (!host || host.disabled) return;
+    markHandled(e);
+    replay(host);
+  }
+
+  /* Swallow the label click, the forwarded switch click, and any delayed ghost click
+     at the same spot so only the one replayed host.click() reaches the app. */
+  function onClickCapture(e) {
+    var t = e.target;
+    if (!t || !t.matches) return;
+    if (t.matches("input[data-hx-sw]")) { e.stopImmediatePropagation(); return; }
+    if (replaying) return; // our host.click() replay — do not swallow it
+
+    var lab = labelOf(t);
+    if (recentlyHandled(e)) {
+      if (lab || t.matches("input[data-hx-sw]")) e.stopImmediatePropagation();
+      else if (lab === null && t.closest && t.closest(TAP)) {
+        // Ghost click on a (possibly new) tile at the same coordinates after a re-render.
+        e.stopImmediatePropagation();
+      }
+      return;
+    }
+    if (!lab) return;
+    e.stopImmediatePropagation();
+    var host = lab.parentElement;
+    if (host && !host.disabled) {
+      markHandled(e);
+      replay(host);
+    }
+    // Do not park a detached label on the body — a delayed click could still hit it.
+  }
+
   function armIOS(el) {
     if (el.querySelector(":scope > label[data-hx]") || el.closest(SKIP) || el.closest("label[data-hx]")) return;
     var lab = d.createElement("label");
@@ -57,6 +147,7 @@
     sw.style.cssText = "position:absolute;left:0;top:0;width:1px;height:1px;margin:0;opacity:0;pointer-events:none";
     lab.appendChild(sw);
     if (getComputedStyle(el).position === "static") el.style.position = "relative";
+    el.style.touchAction = "manipulation";
     el.querySelectorAll(LIFT).forEach(function (c) {      // inner controls (e.g. 🔊 on a word card) stay tappable
       if (c.closest("label[data-hx]")) return;
       if (getComputedStyle(c).position === "static") c.style.position = "relative";
@@ -69,14 +160,47 @@
     if (root.matches(TAP)) armIOS(root);
     root.querySelectorAll(TAP).forEach(armIOS);
   }
+  function clearOverlays() {
+    d.querySelectorAll("label[data-hx]").forEach(function (l) { l.remove(); });
+  }
   function hostOf(n) { return n && n.nodeType === 1 ? n.closest(TAP) : null; }
+  function syncLabels() {
+    if (!on || !isIOS) return;
+    d.querySelectorAll(TAP).forEach(function (el) {
+      if (el.closest(SKIP) || el.closest("label[data-hx]")) return;
+      var lab = el.querySelector(":scope > label[data-hx]");
+      if (!lab) { armIOS(el); return; }
+      if (getComputedStyle(el).position === "static") el.style.position = "relative";
+      lab.style.position = "absolute";
+      lab.style.inset = "0";
+      lab.style.touchAction = "manipulation";
+    });
+  }
+  function unbind() {
+    d.removeEventListener("pointerdown", onDown, true);
+    w.removeEventListener("click", onClickCapture, true);
+    w.removeEventListener("pointerup", onPointerUpCapture, true);
+    w.removeEventListener("pointerdown", onPointerDownClear, true);
+    w.removeEventListener("resize", syncLabels);
+    if (w.visualViewport) w.visualViewport.removeEventListener("resize", syncLabels);
+    if (mo) { mo.disconnect(); mo = null; }
+    if (ro) { ro.disconnect(); ro = null; }
+  }
 
   w.NovaHaptics = {
     init: function () {
-      if (on || !enabled()) return; on = true;
+      if (!enabled()) return;
+      if (on) { // idempotent: never stack listeners or overlays on re-render / boot
+        if (isIOS && !canVibrate) { scan(d.body); syncLabels(); }
+        return;
+      }
+      on = true;
       if (canVibrate) { d.addEventListener("pointerdown", onDown, { passive: true, capture: true }); return; }
       if (!isIOS) return;
+      clearOverlays();
       w.addEventListener("click", onClickCapture, true);
+      w.addEventListener("pointerup", onPointerUpCapture, true);
+      w.addEventListener("pointerdown", onPointerDownClear, true);
       scan(d.body);
       mo = new MutationObserver(function (list) {
         list.forEach(function (m) {
@@ -86,13 +210,20 @@
         });
       });
       mo.observe(d.body, { childList: true, subtree: true });
+      if (typeof ResizeObserver === "function") {
+        ro = new ResizeObserver(function () { syncLabels(); });
+        ro.observe(d.body);
+        var app = d.getElementById("app") || d.getElementById("main");
+        if (app) ro.observe(app);
+      }
+      w.addEventListener("resize", syncLabels);
+      if (w.visualViewport) w.visualViewport.addEventListener("resize", syncLabels);
     },
     stop: function () {
       on = false;
-      d.removeEventListener("pointerdown", onDown, true);
-      w.removeEventListener("click", onClickCapture, true);
-      if (mo) { mo.disconnect(); mo = null; }
-      d.querySelectorAll("label[data-hx]").forEach(function (l) { l.remove(); });
+      unbind();
+      clearOverlays();
+      locks = [];
     },
     isIOS: isIOS, canVibrate: canVibrate
   };
