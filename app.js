@@ -3,7 +3,7 @@
 // Playback: sentence.audio (Fish voice-over), then oa (original), then a (Kokoro), then Web Speech.
 // Naval sentences come from naval.json. Scary and Naval mp3s live under audio/ and are cached on first play.
 
-const VERSION_FALLBACK = "5";
+const VERSION_FALLBACK = "8";
 const STATS_KEY = "puzzle_stats";
 const MASTERY_KEY = "puzzle_mastery";
 const SESSION_KEY = "puzzle_session";
@@ -41,10 +41,15 @@ let round = null;
 let loadError = false;
 let badgeDay = "";
 const ui = { screen: "home", theme: "All", level: 1, board: "all", historyOpen: false };
+let settingsOpen = false;
+const GEAR_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.65l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.07 7.07 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.8a.5.5 0 0 0-.5.42l-.36 2.54c-.59.22-1.14.53-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.8 8.48a.5.5 0 0 0 .12.65l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.92 14.17a.5.5 0 0 0-.12.65l1.92 3.32c.14.24.43.34.7.22l2.39-.96c.49.41 1.04.72 1.63.94l.36 2.54c.05.24.26.42.5.42h3.8c.24 0 .45-.18.5-.42l.36-2.54c.59-.22 1.14-.53 1.63-.94l2.39.96c.27.11.56.02.7-.22l1.92-3.32a.5.5 0 0 0-.12-.65l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg>';
+const SPEAKER_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>';
+
 
 const player = new Audio();
 player.preload = "auto";
 let playToken = 0;
+let listening = false;
 
 const $ = (id) => document.getElementById(id);
 function esc(s) {
@@ -290,6 +295,7 @@ function stopPlayback() {
   playToken++;
   try { player.pause(); } catch (e) {}
   if (window.speechSynthesis) speechSynthesis.cancel();
+  setListening(false);
 }
 function playUrl(url, start, end, token) {
   return new Promise((resolve) => {
@@ -369,6 +375,36 @@ async function playSentence(sentence) {
   const spoke = await speak(sentence.english);
   if (token !== playToken) return "";
   return spoke ? "speech" : "";
+}
+
+
+function hasClip(s) {
+  const field = audioField(s);
+  if (field && field.url) return true;
+  if (s && s.oa) return true;
+  if (s && s.a) return true;
+  return false;
+}
+function setListening(on) {
+  listening = !!on;
+  const btn = document.querySelector("[data-act=listen]");
+  if (!btn) return;
+  btn.classList.toggle("playing", listening);
+  btn.setAttribute("aria-pressed", listening ? "true" : "false");
+  btn.setAttribute("aria-label", listening ? "停止播放 Stop" : "播放原音 Play audio");
+}
+function onListen() {
+  if (!round || !round.sentence || round.phase === "correct" || round.phase === "done") return;
+  if (!hasClip(round.sentence)) return;
+  if (listening) {
+    stopPlayback();
+    return;
+  }
+  const s = round.sentence;
+  setListening(true);
+  playSentence(s).then(() => {
+    if (round && round.sentence === s) setListening(false);
+  });
 }
 
 function dealTiles(sentence) {
@@ -541,8 +577,8 @@ function onTheme(id) {
   ui.screen = "home";
   render();
 }
-let pendingUpdateVersion = "";
 let updateReloading = false;
+const AUDIO_CACHE = "sentence-puzzle-audio";
 
 function versionNewer(next, current) {
   if (next == null || current == null) return false;
@@ -560,81 +596,53 @@ function versionNewer(next, current) {
   }
   return false;
 }
-function askWorkerVersion(worker) {
-  return new Promise((resolve) => {
-    if (!worker) return resolve("");
-    let done = false;
-    const finish = (value) => {
-      if (done) return;
-      done = true;
-      resolve(value ? String(value) : "");
-    };
-    const channel = new MessageChannel();
-    const timer = setTimeout(() => finish(""), 1500);
-    channel.port1.onmessage = (event) => {
-      clearTimeout(timer);
-      const data = event.data || {};
-      finish(data.version != null ? data.version : "");
-    };
-    try {
-      worker.postMessage({ type: "GET_VERSION" }, [channel.port2]);
-    } catch (e) {
-      clearTimeout(timer);
-      finish("");
-    }
-  });
-}
-function takeControl(worker) {
-  if (!worker || worker.state === "redundant" || worker.state === "activated") return;
-  const send = () => {
-    try { worker.postMessage({ type: "SKIP_WAITING" }); } catch (e) {}
-  };
-  if (worker.state === "installing") {
-    worker.addEventListener("statechange", () => {
-      if (worker.state === "installed") send();
-    });
-  } else {
-    send();
-  }
-}
-function reloadForUpdate(version) {
-  if (updateReloading || !version) return;
-  updateReloading = true;
-  try { sessionStorage.setItem("puzzle_updated", String(version)); } catch (e) {}
-  location.reload();
-}
-async function considerUpdate(worker) {
-  const controller = navigator.serviceWorker.controller;
-  if (!worker || !controller || worker === controller) return;
-  const next = await askWorkerVersion(worker);
-  const current = await askWorkerVersion(controller);
-  if (!versionNewer(next, current)) return;
-  pendingUpdateVersion = next;
-  try { sessionStorage.setItem("puzzle_updated_from", current); } catch (e) {}
-  takeControl(worker);
+async function freshMeta() {
+  const res = await fetch("meta.json?t=" + Date.now(), { cache: "no-store" });
+  if (!res.ok) throw new Error("meta");
+  const ct = (res.headers.get("content-type") || "").toLowerCase();
+  if (ct.includes("text/html")) throw new Error("meta-html");
+  return await res.json();
 }
 async function checkUpdate(manual) {
   try {
-    const res = await fetch("meta.json?t=" + Date.now(), { cache: "no-store" });
-    if (!res.ok) throw new Error("meta");
-    const m = await res.json();
-    if (reg) { try { await reg.update(); } catch (e) {} }
+    const m = await freshMeta();
     const cur = String((versionMeta && versionMeta.v) || VERSION_FALLBACK);
     const next = m && m.v != null ? String(m.v) : "";
-    let workerNewer = false;
-    const waiting = reg && (reg.waiting || reg.installing);
-    if (waiting && navigator.serviceWorker.controller) {
-      const before = pendingUpdateVersion;
-      await considerUpdate(waiting);
-      workerNewer = !!pendingUpdateVersion && (versionNewer(pendingUpdateVersion, cur) || pendingUpdateVersion !== before);
+    if (next && next !== cur) {
+      toast("发现新版本，正在更新…");
+      updateReloading = true;
+      try {
+        sessionStorage.setItem("puzzle_updated", next);
+        sessionStorage.setItem("puzzle_updated_from", cur);
+      } catch (e) {}
+      if (reg) { try { await reg.update(); } catch (e) {} }
+      setTimeout(() => location.reload(), 1500);
+    } else {
+      if (reg) { try { await reg.update(); } catch (e) {} }
+      if (manual) toast("You're up to date. 已经是最新版本");
     }
-    if ((next && versionNewer(next, cur)) || workerNewer) {
-      toast("New version. Updating… 发现新版本，正在更新…");
-      if (!workerNewer) setTimeout(() => location.reload(), 800);
-    } else if (manual) toast("You're up to date. 已经是最新版本");
   } catch (e) {
     if (manual) toast("No network. Try again later. 没有网络，稍后再试");
   }
+}
+async function forceUpdate() {
+  toast("Force updating… 正在强制更新…");
+  try {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    for (const r of regs) await r.unregister();
+  } catch (e) {}
+  try {
+    for (const k of await caches.keys()) {
+      if (k === AUDIO_CACHE) continue;
+      if (k.startsWith("sentence-puzzle-")) await caches.delete(k);
+    }
+  } catch (e) {}
+  try {
+    const cur = String((versionMeta && versionMeta.v) || VERSION_FALLBACK);
+    sessionStorage.setItem("puzzle_updated", "force");
+    sessionStorage.setItem("puzzle_updated_from", cur);
+  } catch (e) {}
+  location.reload();
 }
 let toastTimer = 0;
 function placeToast(el) {
@@ -659,10 +667,50 @@ function toast(msg) {
   toastTimer = setTimeout(() => el.classList.remove("on"), 2600);
 }
 
+
+function currentAppearance() {
+  return window.puzzleThemePref ? window.puzzleThemePref() : "light";
+}
+function syncSettingsUI() {
+  const root = $("settings");
+  if (!root) return;
+  if (settingsOpen) root.removeAttribute("hidden");
+  else root.setAttribute("hidden", "");
+  const pref = currentAppearance();
+  root.querySelectorAll(".theme-pick").forEach((el) => {
+    const on = el.dataset.id === pref;
+    el.classList.toggle("on", on);
+    el.setAttribute("aria-checked", on ? "true" : "false");
+  });
+  const gear = document.querySelector(".gear");
+  if (gear) gear.setAttribute("aria-expanded", settingsOpen ? "true" : "false");
+}
+function openSettings() {
+  settingsOpen = true;
+  if (ui.historyOpen) {
+    ui.historyOpen = false;
+    renderBadge();
+  }
+  syncSettingsUI();
+}
+function closeSettings() {
+  if (!settingsOpen) return;
+  settingsOpen = false;
+  syncSettingsUI();
+}
+function onAppearance(id) {
+  if (id !== "light" && id !== "dark" && id !== "auto") return;
+  if (window.applyPuzzleTheme) window.applyPuzzleTheme(id);
+  syncSettingsUI();
+}
+
 function headerHTML() {
   const ver = esc(versionMeta.v || VERSION_FALLBACK);
   if (ui.screen === "home") {
-    return '<h1>Sentence Puzzle<span class="sub">语序拼图</span></h1><span class="ver">v' + ver + "</span>";
+    return '<h1>Sentence Puzzle<span class="sub">语序拼图</span></h1>' +
+      '<div class="hdr-tools"><span class="ver">v' + ver + '</span>' +
+      '<button class="gear" type="button" data-act="settings" aria-label="设置 Settings" aria-haspopup="dialog" aria-expanded="' +
+      (settingsOpen ? "true" : "false") + '">' + GEAR_SVG + "</button></div>";
   }
   const theme = round ? round.theme : ui.theme;
   const zh = THEME_ZH[theme] || "";
@@ -787,8 +835,14 @@ function playMain() {
     (zhOpen ? "true" : "false") + '">提示</button>' +
     (zhOpen ? '<p class="meaning-zh" id="meaning-zh">' + esc(zhText || "No Chinese for this sentence. 这句没有中文。") + "</p>" : "") +
     "</div>";
+  const listenBtn = hasClip(s)
+    ? '<button type="button" class="listen' + (listening ? " playing" : "") + '" data-act="listen" aria-label="' +
+      (listening ? "停止播放 Stop" : "播放原音 Play audio") + '" aria-pressed="' + (listening ? "true" : "false") + '">' +
+      SPEAKER_SVG + "</button>"
+    : "";
   return prog +
-    '<div class="prompt"><b>Put the tiles in order</b><div class="zh">Tap a tile to place it. Tap a placed tile to take it out. 点选排序，再点可撤回。</div></div>' +
+    '<div class="prompt"><div class="prompt-row"><b>Put the tiles in order</b>' + listenBtn + '</div>' +
+    '<div class="zh">Tap a tile to place it. Tap a placed tile to take it out. 点选排序，再点可撤回。</div></div>' +
     msg + '<div class="board-play"><div class="slots">' + placed + slots + "</div></div>" +
     '<div class="bank">' + bank + "</div>" + gold + meaning;
 }
@@ -847,6 +901,7 @@ function render() {
   $("app").dataset.screen = ui.screen;
   main.scrollTop = y;
   renderBadge();
+  syncSettingsUI();
 }
 
 function restore(data) {
@@ -910,6 +965,9 @@ function bind() {
     const b = e.target.closest("[data-act]");
     if (!b) return;
     const act = b.dataset.act;
+    if (act === "settings") { settingsOpen ? closeSettings() : openSettings(); return; }
+    if (act === "settings-close") { closeSettings(); return; }
+    if (act === "appearance") { onAppearance(b.dataset.id); return; }
     if (act === "theme") onTheme(b.dataset.id);
     else if (act === "level") { ui.level = b.dataset.id | 0; ui.screen = "home"; render(); }
     else if (act === "board") { ui.board = b.dataset.id; ui.screen = "home"; render(); }
@@ -917,6 +975,7 @@ function bind() {
     else if (act === "back") onBack();
     else if (act === "check") onCheck();
     else if (act === "hint") onHint();
+    else if (act === "listen") onListen();
     else if (act === "zh") {
       if (round && round.sentence && round.phase !== "correct" && round.phase !== "done") {
         round.showZh = !round.showZh;
@@ -935,40 +994,53 @@ function bind() {
           if (el && kind) el.textContent = heardLabel(kind, s.voice);
         });
       }
-    } else if (act === "update") checkUpdate(true);
+    } else if (act === "update") forceUpdate();
   });
 }
 function registerSW() {
   if (!("serviceWorker" in navigator)) return;
-  navigator.serviceWorker.addEventListener("controllerchange", () => {
-    // First claim and same-version takeovers leave pendingUpdateVersion empty.
-    if (!pendingUpdateVersion) return;
-    reloadForUpdate(pendingUpdateVersion);
+  const sw = navigator.serviceWorker;
+  const had = !!sw.controller;
+  sw.addEventListener("controllerchange", () => {
+    // Reload only if a controller already existed (a new worker took over).
+    // First claim must not reload, and must not set the 已更新 flag.
+    if (had && !updateReloading) {
+      updateReloading = true;
+      location.reload();
+    }
   });
-  navigator.serviceWorker.register("./sw.js", { scope: "./", updateViaCache: "none" }).then((r) => {
+  const v = (versionMeta && versionMeta.v) || VERSION_FALLBACK;
+  sw.register("sw.js?v=" + v, { scope: "./", updateViaCache: "none" }).then((r) => {
     reg = r;
-    r.addEventListener("updatefound", () => {
-      const worker = r.installing;
-      if (!worker) return;
-      worker.addEventListener("statechange", () => {
-        if (worker.state === "installed") considerUpdate(worker);
-      });
-    });
-    if (!navigator.serviceWorker.controller) takeControl(r.installing || r.waiting);
-    else if (r.waiting) considerUpdate(r.waiting);
     r.update().catch(() => {});
   }).catch(() => {});
 }
 async function boot() {
   bind();
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeSettings();
+  });
+  if (window.matchMedia) {
+    try {
+      matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+        if (currentAppearance() === "auto" && window.applyPuzzleTheme) window.applyPuzzleTheme();
+      });
+    } catch (e) {}
+  }
   renderBadge();
   setInterval(() => {
     const t = nyToday();
     if (t !== badgeDay) renderBadge();
   }, 15000);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) renderBadge(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      renderBadge();
+      checkUpdate(false);
+    }
+  });
+  window.addEventListener("pageshow", (e) => { if (e.persisted) checkUpdate(false); });
   try {
-    const m = await (await fetch("meta.json?t=" + Date.now(), { cache: "no-store" })).json();
+    const m = await freshMeta();
     if (m && m.v) versionMeta = m;
   } catch (e) {}
   try {
@@ -993,8 +1065,9 @@ async function boot() {
     if (updatedTo) {
       sessionStorage.removeItem("puzzle_updated");
       sessionStorage.removeItem("puzzle_updated_from");
-      if (versionNewer(updatedTo, fromVersion)) {
-        const shown = String(versionMeta.v || updatedTo);
+      const shown = String(versionMeta.v || "");
+      // Only toast after a real version bump. First SW claim and force-same-version must stay quiet.
+      if (fromVersion && shown && versionNewer(shown, fromVersion)) {
         setTimeout(() => toast("Updated. 已更新 ✓ v" + shown), 400);
       }
     }

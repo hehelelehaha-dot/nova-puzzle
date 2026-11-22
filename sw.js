@@ -1,10 +1,12 @@
 // Sentence Puzzle service worker. Register with scope "./".
 // Cache name is unique to this app. Version must match meta.json "v".
-const VERSION = "5";
+// Shell lives in a versioned cache; audio lives in a long-lived cache.
+const V = "8";
 const PREFIX = "sentence-puzzle-";
-const CACHE = PREFIX + "v" + VERSION;
+const SHELL = PREFIX + V;
+const MEDIA = PREFIX + "audio";
 
-const SHELL = [
+const SHELL_FILES = [
   "./",
   "./index.html",
   "./style.css",
@@ -36,33 +38,48 @@ function isAudioPath(pathname) {
   return /\.mp3$/i.test(pathname);
 }
 
-async function audioUrls() {
-  const res = await fetch(new URL("sentences.json", self.registration.scope), { cache: "no-store" });
-  if (!res.ok) return [];
-  const data = await res.json();
-  const out = [];
-  for (const s of data.sentences || []) {
-    const raw = typeof s.audio === "string" ? s.audio : (s.audio && (s.audio.url || s.audio.src));
-    if (!raw || /^(https?:|blob:|data:)/i.test(raw)) continue;
-    // Precache the small Fish voice-over clips only. Naval and Scary are cached on first play.
-    if (!/^audio\/(?:lash|dealer|daily)\//.test(raw)) continue;
-    out.push(new URL(raw, self.registration.scope).href);
-  }
-  return out;
+function isMetaPath(pathname) {
+  return pathname === "meta.json" || pathname.endsWith("/meta.json");
+}
+
+function isSwPath(pathname) {
+  return pathname === "sw.js" || pathname.endsWith("/sw.js");
+}
+
+function shellKey(req, url) {
+  if (req.mode === "navigate") return "./index.html";
+  const rel = url.pathname.slice(scopePath().length);
+  if (!rel) return "./index.html";
+  return "./" + rel;
+}
+
+function isHtml(res) {
+  return (res.headers.get("content-type") || "").toLowerCase().includes("text/html");
 }
 
 async function putOk(cache, url) {
   try {
     const res = await fetch(url, { cache: "no-store" });
-    if (res.ok && res.status === 200) await cache.put(url, res);
+    if (res.ok && res.status === 200 && !isHtml(res) || (res.ok && !isMetaPath(String(url)))) {
+      const meta = isMetaPath(String(url));
+      if (meta && isHtml(res)) return;
+      await cache.put(url, res);
+    }
   } catch (e) {}
 }
 
-async function cacheFullAudio(cache, url) {
+async function migrateAudio(oldName) {
+  if (oldName === MEDIA || oldName === SHELL) return;
   try {
-    if (await cache.match(url.href)) return;
-    const res = await fetch(url.href, { cache: "no-store" });
-    if (res.ok && res.status === 200) await cache.put(url.href, res);
+    const old = await caches.open(oldName);
+    const media = await caches.open(MEDIA);
+    for (const req of await old.keys()) {
+      const u = new URL(req.url);
+      if (!isAudioPath(u.pathname)) continue;
+      if (await media.match(u.href)) continue;
+      const hit = await old.match(req);
+      if (hit) await media.put(u.href, hit);
+    }
   } catch (e) {}
 }
 
@@ -104,19 +121,40 @@ async function fulfillRange(req, cached) {
   return new Response(slice, { status: 206, headers: headers });
 }
 
+async function cacheFullAudio(cache, url) {
+  try {
+    if (await cache.match(url.href)) return;
+    const res = await fetch(url.href, { cache: "no-store" });
+    if (res.ok && res.status === 200) await cache.put(url.href, res);
+  } catch (e) {}
+}
+
 self.addEventListener("install", (event) => {
   event.waitUntil((async () => {
-    const cache = await caches.open(CACHE);
-    await cache.addAll(SHELL);
-    const urls = await audioUrls();
-    await Promise.all(urls.map((url) => putOk(cache, url)));
+    const cache = await caches.open(SHELL);
+    await Promise.all(SHELL_FILES.map((f) => fetch(f, { cache: "no-store" }).then((r) => {
+      if (r.ok && r.status === 200) {
+        const meta = f === "./meta.json";
+        if (meta && isHtml(r)) return;
+        return cache.put(f, r);
+      }
+    }).catch(() => {})));
+    await self.skipWaiting();
   })());
 });
 
 self.addEventListener("activate", (event) => {
   event.waitUntil((async () => {
-    const keys = await caches.keys();
-    await Promise.all(keys.filter((k) => k.startsWith(PREFIX) && k !== CACHE).map((k) => caches.delete(k)));
+    try {
+      const keys = await caches.keys();
+      for (const k of keys) {
+        if (k === SHELL || k === MEDIA) continue;
+        if (k.startsWith(PREFIX)) {
+          await migrateAudio(k);
+          await caches.delete(k);
+        }
+      }
+    } catch (err) {}
     await self.clients.claim();
   })());
 });
@@ -124,11 +162,11 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("message", (event) => {
   const data = event.data || {};
   if (data.type === "GET_VERSION") {
-    const msg = { type: "VERSION", version: VERSION };
+    const msg = { type: "VERSION", version: V };
     const port = event.ports && event.ports[0];
     if (port) port.postMessage(msg);
     else if (event.source) event.source.postMessage(msg);
-  } else if (data.type === "SKIP_WAITING") {
+  } else if (data.type === "SKIP_WAITING" || data.t === "skip") {
     self.skipWaiting();
   }
 });
@@ -138,71 +176,61 @@ self.addEventListener("fetch", (event) => {
   if (req.method !== "GET") return;
   const url = new URL(req.url);
   if (!inScope(url)) return;
-  event.respondWith(fromCache(event, req, url));
+  if (isSwPath(url.pathname)) return;
+  if (isAudioPath(url.pathname)) {
+    event.respondWith(fromAudio(event, req, url));
+    return;
+  }
+  event.respondWith(fromShell(req, url));
 });
 
-function fetchTimeout(resource, ms, init) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
-  return fetch(resource, Object.assign({}, init, { signal: ctrl.signal })).finally(() => clearTimeout(timer));
-}
-
-async function cachedShell(cache, req, url, nav, meta, audio) {
-  if (audio) {
-    const hit = await cache.match(url.href) || await cache.match(req, { ignoreSearch: true });
-    if (hit) return hit;
-  }
-  const hit = await cache.match(meta ? url.pathname : req, { ignoreSearch: true });
-  if (hit) return hit;
-  if (nav) return await cache.match("./index.html") || await cache.match("./");
-  return null;
-}
-
-async function fromCache(event, req, url) {
-  const cache = await caches.open(CACHE);
-  const nav = req.mode === "navigate";
-  const meta = url.pathname.endsWith("/meta.json");
-  const audio = isAudioPath(url.pathname);
-  const offline = self.navigator && self.navigator.onLine === false;
-  if (offline) {
-    const cached = await cachedShell(cache, req, url, nav, meta, audio);
-    if (cached) {
-      if (audio && req.headers.has("range")) return fulfillRange(req, cached);
-      return cached;
-    }
-  }
+async function fromAudio(event, req, url) {
+  const cache = await caches.open(MEDIA);
   try {
-    if (audio && req.headers.has("range")) {
-      const cached = await cache.match(url.href);
-      if (cached) return fulfillRange(req, cached);
-      const fresh = await fetchTimeout(req, 8000);
-      event.waitUntil(cacheFullAudio(cache, url));
-      return fresh;
+    let hit = await cache.match(url.href) || await cache.match(req, { ignoreSearch: true });
+    if (!hit) {
+      let fresh;
+      try {
+        fresh = await fetch(url.href, { cache: "no-store" });
+      } catch (err) {
+        return fetch(req);
+      }
+      if (!fresh.ok) {
+        try { return await fetch(req); } catch (err) { return fresh; }
+      }
+      try { await cache.put(url.href, fresh.clone()); } catch (err) {}
+      hit = fresh;
     }
-    const fresh = meta
-      ? await fetchTimeout(url.pathname, 8000, { cache: "no-store" })
-      : await fetchTimeout(req, 8000);
-    if (fresh.ok && fresh.status === 200 && fresh.type !== "opaque") {
-      const ct = (fresh.headers.get("content-type") || "").toLowerCase();
-      if (!(meta && ct.includes("text/html"))) {
-        try { await cache.put(meta ? url.pathname : req, fresh.clone()); } catch (err) {}
+    if (req.headers.has("range")) return fulfillRange(req, hit.clone());
+    return hit;
+  } catch (err) {
+    try { return await fetch(req); } catch (e2) { return Response.error(); }
+  }
+}
+
+async function fromShell(req, url) {
+  const cache = await caches.open(SHELL);
+  const key = shellKey(req, url);
+  const meta = isMetaPath(url.pathname);
+  try {
+    const fresh = await fetch(req.mode === "navigate" ? "./index.html" : req, { cache: "no-store" });
+    if (fresh.ok) {
+      if (!(meta && isHtml(fresh))) {
+        try { await cache.put(key, fresh.clone()); } catch (err) {}
+      } else if (meta) {
+        const hit = await cache.match(key, { ignoreSearch: true });
+        if (hit && !isHtml(hit)) return hit;
+        return Response.error();
       }
     }
     return fresh;
-  } catch (e) {
-    if (audio) {
-      const cached = await cache.match(url.href) || await cache.match(req, { ignoreSearch: true });
-      if (cached) {
-        if (req.headers.has("range")) return fulfillRange(req, cached);
-        return cached;
-      }
-    }
-    const hit = await cache.match(req, { ignoreSearch: true });
+  } catch (err) {
+    const hit = await cache.match(key, { ignoreSearch: true }) || await cache.match(req, { ignoreSearch: true });
     if (hit) return hit;
-    if (nav) {
-      const home = await cache.match("./index.html") || await cache.match("./");
-      if (home) return home;
+    if (meta) return Response.error();
+    if (req.mode === "navigate") {
+      return (await cache.match("./index.html")) || (await cache.match("./")) || Response.error();
     }
-    return Response.error();
+    return (await cache.match("./index.html")) || Response.error();
   }
 }
