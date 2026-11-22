@@ -9,6 +9,43 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="语序拼图">
   <title>Sentence Puzzle · 语序拼图</title>
+  <script>
+  (function () {
+    var KEY = "puzzle_theme";
+    var LIGHT = "#F8F5F2";
+    var DARK = "#121621";
+    function pref() {
+      try {
+        var v = localStorage.getItem(KEY);
+        if (v === "light" || v === "dark" || v === "auto") return v;
+      } catch (e) {}
+      return "light";
+    }
+    function resolved(p) {
+      if (p === "dark") return "dark";
+      if (p === "auto" && window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) return "dark";
+      return "light";
+    }
+    function apply(next) {
+      var p = next || pref();
+      if (next === "light" || next === "dark" || next === "auto") {
+        try { localStorage.setItem(KEY, next); } catch (e) {}
+        p = next;
+      }
+      var mode = resolved(p);
+      document.documentElement.setAttribute("data-theme", mode);
+      var meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute("content", mode === "dark" ? DARK : LIGHT);
+      var bar = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
+      if (bar) bar.setAttribute("content", mode === "dark" ? "black-translucent" : "default");
+      return mode;
+    }
+    window.PUZZLE_THEME_KEY = KEY;
+    window.puzzleThemePref = pref;
+    window.applyPuzzleTheme = apply;
+    apply();
+  })();
+  </script>
   <link rel="manifest" href="manifest.json">
   <link rel="apple-touch-icon" href="apple-touch-icon.png" sizes="180x180">
   <link rel="icon" href="icons/favicon-16.png" sizes="16x16" type="image/png">
@@ -25,6 +62,28 @@
     <div id="today"></div>
   </div>
   <div id="toast" role="status"></div>
+  <div id="settings" hidden>
+    <div class="settings-backdrop" data-act="settings-close"></div>
+    <div class="settings-sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <div class="settings-handle" aria-hidden="true"></div>
+      <h2 id="settings-title">设置 <span>Settings</span></h2>
+      <p class="settings-label">主题 Theme</p>
+      <div class="theme-picks" role="radiogroup" aria-label="主题 Theme">
+        <button type="button" class="theme-pick" data-act="appearance" data-id="light" role="radio">
+          <span class="theme-ico" aria-hidden="true">☀️</span>
+          <b>亮色</b><i>Light</i>
+        </button>
+        <button type="button" class="theme-pick" data-act="appearance" data-id="dark" role="radio">
+          <span class="theme-ico" aria-hidden="true">🌙</span>
+          <b>暗色</b><i>Dark</i>
+        </button>
+        <button type="button" class="theme-pick" data-act="appearance" data-id="auto" role="radio">
+          <span class="theme-ico" aria-hidden="true">◌</span>
+          <b>跟随系统</b><i>Auto</i>
+        </button>
+      </div>
+    </div>
+  </div>
   <script src="feel.js"></script>
   <script src="app.js"></script>
 </body>

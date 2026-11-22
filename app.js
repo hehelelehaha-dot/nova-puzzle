@@ -3,7 +3,7 @@
 // Playback: sentence.audio (Fish voice-over), then oa (original), then a (Kokoro), then Web Speech.
 // Naval sentences come from naval.json. Scary and Naval mp3s live under audio/ and are cached on first play.
 
-const VERSION_FALLBACK = "5";
+const VERSION_FALLBACK = "6";
 const STATS_KEY = "puzzle_stats";
 const MASTERY_KEY = "puzzle_mastery";
 const SESSION_KEY = "puzzle_session";
@@ -41,6 +41,9 @@ let round = null;
 let loadError = false;
 let badgeDay = "";
 const ui = { screen: "home", theme: "All", level: 1, board: "all", historyOpen: false };
+let settingsOpen = false;
+const GEAR_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.65l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.07 7.07 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.8a.5.5 0 0 0-.5.42l-.36 2.54c-.59.22-1.14.53-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.8 8.48a.5.5 0 0 0 .12.65l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.92 14.17a.5.5 0 0 0-.12.65l1.92 3.32c.14.24.43.34.7.22l2.39-.96c.49.41 1.04.72 1.63.94l.36 2.54c.05.24.26.42.5.42h3.8c.24 0 .45-.18.5-.42l.36-2.54c.59-.22 1.14-.53 1.63-.94l2.39.96c.27.11.56.02.7-.22l1.92-3.32a.5.5 0 0 0-.12-.65l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg>';
+
 
 const player = new Audio();
 player.preload = "auto";
@@ -659,10 +662,50 @@ function toast(msg) {
   toastTimer = setTimeout(() => el.classList.remove("on"), 2600);
 }
 
+
+function currentAppearance() {
+  return window.puzzleThemePref ? window.puzzleThemePref() : "light";
+}
+function syncSettingsUI() {
+  const root = $("settings");
+  if (!root) return;
+  if (settingsOpen) root.removeAttribute("hidden");
+  else root.setAttribute("hidden", "");
+  const pref = currentAppearance();
+  root.querySelectorAll(".theme-pick").forEach((el) => {
+    const on = el.dataset.id === pref;
+    el.classList.toggle("on", on);
+    el.setAttribute("aria-checked", on ? "true" : "false");
+  });
+  const gear = document.querySelector(".gear");
+  if (gear) gear.setAttribute("aria-expanded", settingsOpen ? "true" : "false");
+}
+function openSettings() {
+  settingsOpen = true;
+  if (ui.historyOpen) {
+    ui.historyOpen = false;
+    renderBadge();
+  }
+  syncSettingsUI();
+}
+function closeSettings() {
+  if (!settingsOpen) return;
+  settingsOpen = false;
+  syncSettingsUI();
+}
+function onAppearance(id) {
+  if (id !== "light" && id !== "dark" && id !== "auto") return;
+  if (window.applyPuzzleTheme) window.applyPuzzleTheme(id);
+  syncSettingsUI();
+}
+
 function headerHTML() {
   const ver = esc(versionMeta.v || VERSION_FALLBACK);
   if (ui.screen === "home") {
-    return '<h1>Sentence Puzzle<span class="sub">语序拼图</span></h1><span class="ver">v' + ver + "</span>";
+    return '<h1>Sentence Puzzle<span class="sub">语序拼图</span></h1>' +
+      '<div class="hdr-tools"><span class="ver">v' + ver + '</span>' +
+      '<button class="gear" type="button" data-act="settings" aria-label="设置 Settings" aria-haspopup="dialog" aria-expanded="' +
+      (settingsOpen ? "true" : "false") + '">' + GEAR_SVG + "</button></div>";
   }
   const theme = round ? round.theme : ui.theme;
   const zh = THEME_ZH[theme] || "";
@@ -847,6 +890,7 @@ function render() {
   $("app").dataset.screen = ui.screen;
   main.scrollTop = y;
   renderBadge();
+  syncSettingsUI();
 }
 
 function restore(data) {
@@ -910,6 +954,9 @@ function bind() {
     const b = e.target.closest("[data-act]");
     if (!b) return;
     const act = b.dataset.act;
+    if (act === "settings") { settingsOpen ? closeSettings() : openSettings(); return; }
+    if (act === "settings-close") { closeSettings(); return; }
+    if (act === "appearance") { onAppearance(b.dataset.id); return; }
     if (act === "theme") onTheme(b.dataset.id);
     else if (act === "level") { ui.level = b.dataset.id | 0; ui.screen = "home"; render(); }
     else if (act === "board") { ui.board = b.dataset.id; ui.screen = "home"; render(); }
@@ -961,6 +1008,16 @@ function registerSW() {
 }
 async function boot() {
   bind();
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeSettings();
+  });
+  if (window.matchMedia) {
+    try {
+      matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+        if (currentAppearance() === "auto" && window.applyPuzzleTheme) window.applyPuzzleTheme();
+      });
+    } catch (e) {}
+  }
   renderBadge();
   setInterval(() => {
     const t = nyToday();
