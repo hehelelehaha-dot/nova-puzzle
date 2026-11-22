@@ -3,7 +3,7 @@
 // Playback: sentence.audio (Fish voice-over), then oa (original), then a (Kokoro), then Web Speech.
 // Naval sentences come from naval.json. Scary and Naval mp3s live under audio/ and are cached on first play.
 
-const VERSION_FALLBACK = "7";
+const VERSION_FALLBACK = "8";
 const STATS_KEY = "puzzle_stats";
 const MASTERY_KEY = "puzzle_mastery";
 const SESSION_KEY = "puzzle_session";
@@ -577,8 +577,8 @@ function onTheme(id) {
   ui.screen = "home";
   render();
 }
-let pendingUpdateVersion = "";
 let updateReloading = false;
+const AUDIO_CACHE = "sentence-puzzle-audio";
 
 function versionNewer(next, current) {
   if (next == null || current == null) return false;
@@ -596,81 +596,53 @@ function versionNewer(next, current) {
   }
   return false;
 }
-function askWorkerVersion(worker) {
-  return new Promise((resolve) => {
-    if (!worker) return resolve("");
-    let done = false;
-    const finish = (value) => {
-      if (done) return;
-      done = true;
-      resolve(value ? String(value) : "");
-    };
-    const channel = new MessageChannel();
-    const timer = setTimeout(() => finish(""), 1500);
-    channel.port1.onmessage = (event) => {
-      clearTimeout(timer);
-      const data = event.data || {};
-      finish(data.version != null ? data.version : "");
-    };
-    try {
-      worker.postMessage({ type: "GET_VERSION" }, [channel.port2]);
-    } catch (e) {
-      clearTimeout(timer);
-      finish("");
-    }
-  });
-}
-function takeControl(worker) {
-  if (!worker || worker.state === "redundant" || worker.state === "activated") return;
-  const send = () => {
-    try { worker.postMessage({ type: "SKIP_WAITING" }); } catch (e) {}
-  };
-  if (worker.state === "installing") {
-    worker.addEventListener("statechange", () => {
-      if (worker.state === "installed") send();
-    });
-  } else {
-    send();
-  }
-}
-function reloadForUpdate(version) {
-  if (updateReloading || !version) return;
-  updateReloading = true;
-  try { sessionStorage.setItem("puzzle_updated", String(version)); } catch (e) {}
-  location.reload();
-}
-async function considerUpdate(worker) {
-  const controller = navigator.serviceWorker.controller;
-  if (!worker || !controller || worker === controller) return;
-  const next = await askWorkerVersion(worker);
-  const current = await askWorkerVersion(controller);
-  if (!versionNewer(next, current)) return;
-  pendingUpdateVersion = next;
-  try { sessionStorage.setItem("puzzle_updated_from", current); } catch (e) {}
-  takeControl(worker);
+async function freshMeta() {
+  const res = await fetch("meta.json?t=" + Date.now(), { cache: "no-store" });
+  if (!res.ok) throw new Error("meta");
+  const ct = (res.headers.get("content-type") || "").toLowerCase();
+  if (ct.includes("text/html")) throw new Error("meta-html");
+  return await res.json();
 }
 async function checkUpdate(manual) {
   try {
-    const res = await fetch("meta.json?t=" + Date.now(), { cache: "no-store" });
-    if (!res.ok) throw new Error("meta");
-    const m = await res.json();
-    if (reg) { try { await reg.update(); } catch (e) {} }
+    const m = await freshMeta();
     const cur = String((versionMeta && versionMeta.v) || VERSION_FALLBACK);
     const next = m && m.v != null ? String(m.v) : "";
-    let workerNewer = false;
-    const waiting = reg && (reg.waiting || reg.installing);
-    if (waiting && navigator.serviceWorker.controller) {
-      const before = pendingUpdateVersion;
-      await considerUpdate(waiting);
-      workerNewer = !!pendingUpdateVersion && (versionNewer(pendingUpdateVersion, cur) || pendingUpdateVersion !== before);
+    if (next && next !== cur) {
+      toast("发现新版本，正在更新…");
+      updateReloading = true;
+      try {
+        sessionStorage.setItem("puzzle_updated", next);
+        sessionStorage.setItem("puzzle_updated_from", cur);
+      } catch (e) {}
+      if (reg) { try { await reg.update(); } catch (e) {} }
+      setTimeout(() => location.reload(), 1500);
+    } else {
+      if (reg) { try { await reg.update(); } catch (e) {} }
+      if (manual) toast("You're up to date. 已经是最新版本");
     }
-    if ((next && versionNewer(next, cur)) || workerNewer) {
-      toast("New version. Updating… 发现新版本，正在更新…");
-      if (!workerNewer) setTimeout(() => location.reload(), 800);
-    } else if (manual) toast("You're up to date. 已经是最新版本");
   } catch (e) {
     if (manual) toast("No network. Try again later. 没有网络，稍后再试");
   }
+}
+async function forceUpdate() {
+  toast("Force updating… 正在强制更新…");
+  try {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    for (const r of regs) await r.unregister();
+  } catch (e) {}
+  try {
+    for (const k of await caches.keys()) {
+      if (k === AUDIO_CACHE) continue;
+      if (k.startsWith("sentence-puzzle-")) await caches.delete(k);
+    }
+  } catch (e) {}
+  try {
+    const cur = String((versionMeta && versionMeta.v) || VERSION_FALLBACK);
+    sessionStorage.setItem("puzzle_updated", "force");
+    sessionStorage.setItem("puzzle_updated_from", cur);
+  } catch (e) {}
+  location.reload();
 }
 let toastTimer = 0;
 function placeToast(el) {
@@ -1022,27 +994,24 @@ function bind() {
           if (el && kind) el.textContent = heardLabel(kind, s.voice);
         });
       }
-    } else if (act === "update") checkUpdate(true);
+    } else if (act === "update") forceUpdate();
   });
 }
 function registerSW() {
   if (!("serviceWorker" in navigator)) return;
-  navigator.serviceWorker.addEventListener("controllerchange", () => {
-    // First claim and same-version takeovers leave pendingUpdateVersion empty.
-    if (!pendingUpdateVersion) return;
-    reloadForUpdate(pendingUpdateVersion);
+  const sw = navigator.serviceWorker;
+  const had = !!sw.controller;
+  sw.addEventListener("controllerchange", () => {
+    // Reload only if a controller already existed (a new worker took over).
+    // First claim must not reload, and must not set the 已更新 flag.
+    if (had && !updateReloading) {
+      updateReloading = true;
+      location.reload();
+    }
   });
-  navigator.serviceWorker.register("./sw.js", { scope: "./", updateViaCache: "none" }).then((r) => {
+  const v = (versionMeta && versionMeta.v) || VERSION_FALLBACK;
+  sw.register("sw.js?v=" + v, { scope: "./", updateViaCache: "none" }).then((r) => {
     reg = r;
-    r.addEventListener("updatefound", () => {
-      const worker = r.installing;
-      if (!worker) return;
-      worker.addEventListener("statechange", () => {
-        if (worker.state === "installed") considerUpdate(worker);
-      });
-    });
-    if (!navigator.serviceWorker.controller) takeControl(r.installing || r.waiting);
-    else if (r.waiting) considerUpdate(r.waiting);
     r.update().catch(() => {});
   }).catch(() => {});
 }
@@ -1063,9 +1032,15 @@ async function boot() {
     const t = nyToday();
     if (t !== badgeDay) renderBadge();
   }, 15000);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) renderBadge(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      renderBadge();
+      checkUpdate(false);
+    }
+  });
+  window.addEventListener("pageshow", (e) => { if (e.persisted) checkUpdate(false); });
   try {
-    const m = await (await fetch("meta.json?t=" + Date.now(), { cache: "no-store" })).json();
+    const m = await freshMeta();
     if (m && m.v) versionMeta = m;
   } catch (e) {}
   try {
@@ -1090,8 +1065,9 @@ async function boot() {
     if (updatedTo) {
       sessionStorage.removeItem("puzzle_updated");
       sessionStorage.removeItem("puzzle_updated_from");
-      if (versionNewer(updatedTo, fromVersion)) {
-        const shown = String(versionMeta.v || updatedTo);
+      const shown = String(versionMeta.v || "");
+      // Only toast after a real version bump. First SW claim and force-same-version must stay quiet.
+      if (fromVersion && shown && versionNewer(shown, fromVersion)) {
         setTimeout(() => toast("Updated. 已更新 ✓ v" + shown), 400);
       }
     }
