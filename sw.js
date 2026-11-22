@@ -1,6 +1,6 @@
 // Sentence Puzzle service worker. Register with scope "./".
 // Cache name is unique to this app. Version must match meta.json "v".
-const VERSION = "3";
+const VERSION = "4";
 const PREFIX = "sentence-puzzle-";
 const CACHE = PREFIX + "v" + VERSION;
 
@@ -9,6 +9,8 @@ const SHELL = [
   "./index.html",
   "./style.css",
   "./app.js",
+  "./feel.js",
+  "./fonts/PlayfairDisplay-VariableFont_wght.ttf",
   "./manifest.json",
   "./meta.json",
   "./sentences.json",
