@@ -1,7 +1,7 @@
 // Sentence Puzzle service worker. Register with scope "./".
 // Cache name is unique to this app. Version must match meta.json "v".
 // Shell lives in a versioned cache; audio lives in a long-lived cache.
-const V = "9";
+const V = "10";
 const PREFIX = "sentence-puzzle-";
 const SHELL = PREFIX + V;
 const MEDIA = PREFIX + "audio";
@@ -12,6 +12,7 @@ const SHELL_FILES = [
   "./style.css",
   "./app.js",
   "./feel.js",
+  "./haptics.js",
   "./fonts/PlayfairDisplay-VariableFont_wght.ttf",
   "./manifest.json",
   "./meta.json",
@@ -65,6 +66,20 @@ async function putOk(cache, url) {
       if (meta && isHtml(res)) return;
       await cache.put(url, res);
     }
+  } catch (e) {}
+}
+
+async function evictCachedWords() {
+  try {
+    const media = await caches.open(MEDIA);
+    const keys = await media.keys();
+    await Promise.all(keys.map((req) => {
+      try {
+        const u = new URL(req.url);
+        if (u.pathname.includes("/words/")) return media.delete(req);
+      } catch (e) {}
+      return Promise.resolve(false);
+    }));
   } catch (e) {}
 }
 
@@ -154,6 +169,7 @@ self.addEventListener("activate", (event) => {
           await caches.delete(k);
         }
       }
+      await evictCachedWords();
     } catch (err) {}
     await self.clients.claim();
   })());

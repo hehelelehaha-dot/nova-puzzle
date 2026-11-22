@@ -3,12 +3,13 @@
 // Playback: sentence.audio (Fish voice-over), then oa (original), then a (Kokoro), then Web Speech.
 // Naval sentences come from naval.json. Scary and Naval mp3s live under audio/ and are cached on first play.
 
-const VERSION_FALLBACK = "9";
+const VERSION_FALLBACK = "10";
 const STATS_KEY = "puzzle_stats";
 const MASTERY_KEY = "puzzle_mastery";
 const SESSION_KEY = "puzzle_session";
 const DAYS_KEY = "puzzle_days";
 const WORD_AUDIO_KEY = "puzzle_word_audio";
+const HAPTICS_KEY = "puzzle_haptics";
 const TZ = "America/New_York";
 
 const THEMES = [
@@ -149,6 +150,19 @@ function wordAudioOn() {
 }
 function setWordAudio(on) {
   try { localStorage.setItem(WORD_AUDIO_KEY, on ? "1" : "0"); } catch (e) {}
+}
+function hapticsOn() {
+  try { return localStorage.getItem(HAPTICS_KEY) !== "0"; } catch (e) { return true; }
+}
+function setHaptics(on) {
+  try { localStorage.setItem(HAPTICS_KEY, on ? "1" : "0"); } catch (e) {}
+  if (!window.NovaHaptics) return;
+  if (on) {
+    try { NovaHaptics.init(); } catch (e) {}
+  } else {
+    // Defer so the iOS switch click can finish; onClickCapture may otherwise re-append the label.
+    setTimeout(function () { try { NovaHaptics.stop(); } catch (e) {} }, 0);
+  }
 }
 function clearWordHighlight() {
   document.querySelectorAll(".sent-word.on").forEach((el) => el.classList.remove("on"));
@@ -893,6 +907,12 @@ function syncSettingsUI() {
     audioBtn.classList.toggle("on", on);
     audioBtn.setAttribute("aria-checked", on ? "true" : "false");
   }
+  const hapBtn = root.querySelector("[data-act=haptics]");
+  if (hapBtn) {
+    const on = hapticsOn();
+    hapBtn.classList.toggle("on", on);
+    hapBtn.setAttribute("aria-checked", on ? "true" : "false");
+  }
   const gear = document.querySelector(".gear");
   if (gear) gear.setAttribute("aria-expanded", settingsOpen ? "true" : "false");
 }
@@ -900,6 +920,10 @@ function onWordAudioToggle() {
   setWordAudio(!wordAudioOn());
   syncSettingsUI();
   if (ui.screen === "play" && round && round.phase === "correct") render();
+}
+function onHapticsToggle() {
+  setHaptics(!hapticsOn());
+  syncSettingsUI();
 }
 function openSettings() {
   settingsOpen = true;
@@ -1208,6 +1232,7 @@ function bind() {
     if (act === "settings-close") { closeSettings(); return; }
     if (act === "appearance") { onAppearance(b.dataset.id); return; }
     if (act === "word-audio") { onWordAudioToggle(); return; }
+    if (act === "haptics") { onHapticsToggle(); return; }
     if (act === "say-word") { playWord(b.dataset.word || b.textContent, b); return; }
     if (act === "theme") onTheme(b.dataset.id);
     else if (act === "level") { ui.level = b.dataset.id | 0; ui.screen = "home"; render(); }
@@ -1315,6 +1340,9 @@ async function boot() {
     }
     if (versionMeta.v) localStorage.setItem("puzzle_v", String(versionMeta.v));
   } catch (e) {}
+  if (hapticsOn() && window.NovaHaptics) {
+    try { NovaHaptics.init(); } catch (e) {}
+  }
   registerSW();
   startUpdatePoll();
   try {

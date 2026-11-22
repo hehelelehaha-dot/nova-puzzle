@@ -87,8 +87,15 @@
         <span class="audio-toggle-text">单词发音 Word audio</span>
         <span class="switch" aria-hidden="true"></span>
       </button>
+      <p class="settings-label settings-label-later">触感 Haptics</p>
+      <button type="button" class="audio-toggle" data-act="haptics" role="switch" aria-checked="true">
+        <span class="audio-toggle-text">触感 Haptics</span>
+        <span class="switch" aria-hidden="true"></span>
+      </button>
     </div>
   </div>
+  <script src="haptics.js"></script>
+  <script>try{if(localStorage.getItem("puzzle_haptics")!=="0"&&window.NovaHaptics)NovaHaptics.init()}catch(e){}</script>
   <script src="feel.js"></script>
   <script src="app.js"></script>
 </body>
