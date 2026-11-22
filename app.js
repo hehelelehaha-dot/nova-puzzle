@@ -3,7 +3,7 @@
 // Playback: sentence.audio (Fish voice-over), then oa (original), then a (Kokoro), then Web Speech.
 // Naval sentences come from naval.json. Scary and Naval mp3s live under audio/ and are cached on first play.
 
-const VERSION_FALLBACK = "6";
+const VERSION_FALLBACK = "7";
 const STATS_KEY = "puzzle_stats";
 const MASTERY_KEY = "puzzle_mastery";
 const SESSION_KEY = "puzzle_session";
@@ -43,11 +43,13 @@ let badgeDay = "";
 const ui = { screen: "home", theme: "All", level: 1, board: "all", historyOpen: false };
 let settingsOpen = false;
 const GEAR_SVG = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.65l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.07 7.07 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.8a.5.5 0 0 0-.5.42l-.36 2.54c-.59.22-1.14.53-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.8 8.48a.5.5 0 0 0 .12.65l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.92 14.17a.5.5 0 0 0-.12.65l1.92 3.32c.14.24.43.34.7.22l2.39-.96c.49.41 1.04.72 1.63.94l.36 2.54c.05.24.26.42.5.42h3.8c.24 0 .45-.18.5-.42l.36-2.54c.59-.22 1.14-.53 1.63-.94l2.39.96c.27.11.56.02.7-.22l1.92-3.32a.5.5 0 0 0-.12-.65l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg>';
+const SPEAKER_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>';
 
 
 const player = new Audio();
 player.preload = "auto";
 let playToken = 0;
+let listening = false;
 
 const $ = (id) => document.getElementById(id);
 function esc(s) {
@@ -293,6 +295,7 @@ function stopPlayback() {
   playToken++;
   try { player.pause(); } catch (e) {}
   if (window.speechSynthesis) speechSynthesis.cancel();
+  setListening(false);
 }
 function playUrl(url, start, end, token) {
   return new Promise((resolve) => {
@@ -372,6 +375,36 @@ async function playSentence(sentence) {
   const spoke = await speak(sentence.english);
   if (token !== playToken) return "";
   return spoke ? "speech" : "";
+}
+
+
+function hasClip(s) {
+  const field = audioField(s);
+  if (field && field.url) return true;
+  if (s && s.oa) return true;
+  if (s && s.a) return true;
+  return false;
+}
+function setListening(on) {
+  listening = !!on;
+  const btn = document.querySelector("[data-act=listen]");
+  if (!btn) return;
+  btn.classList.toggle("playing", listening);
+  btn.setAttribute("aria-pressed", listening ? "true" : "false");
+  btn.setAttribute("aria-label", listening ? "停止播放 Stop" : "播放原音 Play audio");
+}
+function onListen() {
+  if (!round || !round.sentence || round.phase === "correct" || round.phase === "done") return;
+  if (!hasClip(round.sentence)) return;
+  if (listening) {
+    stopPlayback();
+    return;
+  }
+  const s = round.sentence;
+  setListening(true);
+  playSentence(s).then(() => {
+    if (round && round.sentence === s) setListening(false);
+  });
 }
 
 function dealTiles(sentence) {
@@ -830,8 +863,14 @@ function playMain() {
     (zhOpen ? "true" : "false") + '">提示</button>' +
     (zhOpen ? '<p class="meaning-zh" id="meaning-zh">' + esc(zhText || "No Chinese for this sentence. 这句没有中文。") + "</p>" : "") +
     "</div>";
+  const listenBtn = hasClip(s)
+    ? '<button type="button" class="listen' + (listening ? " playing" : "") + '" data-act="listen" aria-label="' +
+      (listening ? "停止播放 Stop" : "播放原音 Play audio") + '" aria-pressed="' + (listening ? "true" : "false") + '">' +
+      SPEAKER_SVG + "</button>"
+    : "";
   return prog +
-    '<div class="prompt"><b>Put the tiles in order</b><div class="zh">Tap a tile to place it. Tap a placed tile to take it out. 点选排序，再点可撤回。</div></div>' +
+    '<div class="prompt"><div class="prompt-row"><b>Put the tiles in order</b>' + listenBtn + '</div>' +
+    '<div class="zh">Tap a tile to place it. Tap a placed tile to take it out. 点选排序，再点可撤回。</div></div>' +
     msg + '<div class="board-play"><div class="slots">' + placed + slots + "</div></div>" +
     '<div class="bank">' + bank + "</div>" + gold + meaning;
 }
@@ -964,6 +1003,7 @@ function bind() {
     else if (act === "back") onBack();
     else if (act === "check") onCheck();
     else if (act === "hint") onHint();
+    else if (act === "listen") onListen();
     else if (act === "zh") {
       if (round && round.sentence && round.phase !== "correct" && round.phase !== "done") {
         round.showZh = !round.showZh;

@@ -436,7 +436,14 @@ button:disabled { opacity: .4; }
 }
 .bar > i { display: block; height: 100%; background: var(--accent); border-radius: 99px; }
 .prompt { margin: 0 0 14px; }
+.prompt-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 .prompt b {
+  flex: 1;
+  min-width: 0;
   display: block;
   font-family: var(--en);
   font-size: 18px;
@@ -445,6 +452,28 @@ button:disabled { opacity: .4; }
   letter-spacing: -0.02em;
 }
 .prompt .zh { font-size: 12px; margin-top: 4px; }
+.listen {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--chip);
+  color: var(--ink);
+  display: grid;
+  place-items: center;
+  flex: none;
+  touch-action: manipulation;
+}
+.listen svg { display: block; }
+.listen.playing {
+  background: var(--accent);
+  color: #fff;
+}
+html[data-theme="dark"] .listen.playing {
+  background: #F7F5F0;
+  color: #161A2C;
+}
 
 .board-play {
   background: var(--card);
