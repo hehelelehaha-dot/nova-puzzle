@@ -191,6 +191,15 @@ main {
   -webkit-overflow-scrolling: touch;
 }
 main.arrange { display: flex; flex-direction: column; }
+main.arrange .prog,
+main.arrange .prompt,
+main.arrange .msg,
+main.arrange .board-play,
+main.arrange .slots,
+main.arrange .bank,
+main.arrange .meaning {
+  flex-shrink: 0;
+}
 
 .meaning {
   margin-top: auto;
@@ -481,11 +490,14 @@ html[data-theme="dark"] .listen.playing {
   border-radius: var(--radius-card);
   padding: 14px;
   min-height: 80px;
+  height: auto;
   margin-bottom: 14px;
   box-shadow: var(--shadow);
+  overflow: visible;
 }
 .slots, .bank { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; }
-.bank { min-height: 48px; margin-bottom: 8px; }
+.slots { width: 100%; }
+.bank { min-height: 48px; margin-bottom: 8px; position: relative; }
 .slot {
   min-width: 56px;
   min-height: 42px;
@@ -955,3 +967,6 @@ html[data-theme="dark"] .settings-sheet { box-shadow: 0 -12px 40px rgba(0, 0, 0,
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
+
+
+button, .tile, label[data-hx] { touch-action: manipulation; }

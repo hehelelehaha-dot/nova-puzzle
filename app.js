@@ -3,7 +3,7 @@
 // Playback: sentence.audio (Fish voice-over), then oa (original), then a (Kokoro), then Web Speech.
 // Naval sentences come from naval.json. Scary and Naval mp3s live under audio/ and are cached on first play.
 
-const VERSION_FALLBACK = "10";
+const VERSION_FALLBACK = "11";
 const STATS_KEY = "puzzle_stats";
 const MASTERY_KEY = "puzzle_mastery";
 const SESSION_KEY = "puzzle_session";
@@ -1067,9 +1067,6 @@ function playMain() {
   const bank = round.bank.map((index) => (
     '<button type="button" class="tile" data-act="place" data-i="' + index + '">' + esc(s.tiles[index]) + "</button>"
   )).join("");
-  const gold = (round.locked && round.locked.some(Boolean))
-    ? '<p class="muted">Locked tiles stay in place. <span class="zh">锁定的词卡已固定。</span></p>'
-    : "";
   const zhOpen = !!round.showZh;
   const zhText = s.chinese || s.zh || "";
   const meaning = '<div class="meaning"><button type="button" class="meaning-btn" data-act="zh" aria-expanded="' +
@@ -1085,7 +1082,7 @@ function playMain() {
     '<div class="prompt"><div class="prompt-row"><b>Put the tiles in order</b>' + listenBtn + '</div>' +
     '<div class="zh">Tap a tile to place it. Tap a placed tile to take it out. 点选排序，再点可撤回。</div></div>' +
     msg + '<div class="board-play"><div class="slots">' + placed + "</div></div>" +
-    '<div class="bank">' + bank + "</div>" + gold + meaning;
+    '<div class="bank">' + bank + "</div>" + meaning;
 }
 function doneMain() {
   return '<div class="hero"><b>Set complete</b><span class="zh">这组练完了</span></div>' +
