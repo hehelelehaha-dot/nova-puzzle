@@ -3,11 +3,12 @@
 // Playback: sentence.audio (Fish voice-over), then oa (original), then a (Kokoro), then Web Speech.
 // Naval sentences come from naval.json. Scary and Naval mp3s live under audio/ and are cached on first play.
 
-const VERSION_FALLBACK = "8";
+const VERSION_FALLBACK = "9";
 const STATS_KEY = "puzzle_stats";
 const MASTERY_KEY = "puzzle_mastery";
 const SESSION_KEY = "puzzle_session";
 const DAYS_KEY = "puzzle_days";
+const WORD_AUDIO_KEY = "puzzle_word_audio";
 const TZ = "America/New_York";
 
 const THEMES = [
@@ -48,7 +49,10 @@ const SPEAKER_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden
 
 const player = new Audio();
 player.preload = "auto";
+const wordPlayer = new Audio();
+wordPlayer.preload = "auto";
 let playToken = 0;
+let wordPlayToken = 0;
 let listening = false;
 
 const $ = (id) => document.getElementById(id);
@@ -127,6 +131,65 @@ function sameNorm(a, b) {
 function isCorrect(words, sentence) {
   const lists = [sentence.tiles].concat(sentence.accepted || []);
   return lists.some((list) => sameSeq(words, list) || sameNorm(words, list));
+}
+function wordSlug(w) {
+  const tok = normTok(w);
+  return tok ? tok.replace(/'/g, "-") : "";
+}
+function wordAudioUrl(w) {
+  const slug = wordSlug(w);
+  return slug ? ("words/" + encodeURIComponent(slug) + ".mp3") : "";
+}
+function wordAudioOn() {
+  try {
+    const v = localStorage.getItem(WORD_AUDIO_KEY);
+    if (v === "0" || v === "off" || v === "false") return false;
+  } catch (e) {}
+  return true;
+}
+function setWordAudio(on) {
+  try { localStorage.setItem(WORD_AUDIO_KEY, on ? "1" : "0"); } catch (e) {}
+}
+function clearWordHighlight() {
+  document.querySelectorAll(".sent-word.on").forEach((el) => el.classList.remove("on"));
+}
+function stopWordAudio() {
+  wordPlayToken++;
+  try { wordPlayer.pause(); } catch (e) {}
+  try { wordPlayer.removeAttribute("src"); wordPlayer.load(); } catch (e) {}
+  clearWordHighlight();
+}
+function playWord(word, el) {
+  if (!wordAudioOn()) return;
+  markBusy(400);
+  const url = wordAudioUrl(word);
+  if (!url) return;
+  const token = ++wordPlayToken;
+  clearWordHighlight();
+  if (el) el.classList.add("on");
+  try { player.pause(); } catch (e) {}
+  setListening(false);
+  try { wordPlayer.pause(); } catch (e) {}
+  wordPlayer.onended = () => {
+    if (token !== wordPlayToken) return;
+    if (el) el.classList.remove("on");
+  };
+  wordPlayer.onerror = () => {
+    if (token !== wordPlayToken) return;
+    if (el) el.classList.remove("on");
+  };
+  wordPlayer.src = url;
+  const p = wordPlayer.play();
+  if (p && p.catch) p.catch(() => { if (token === wordPlayToken && el) el.classList.remove("on"); });
+}
+function sentenceWordsHTML(text) {
+  const raw = String(text || "");
+  if (!wordAudioOn()) return esc(raw);
+  // Contractions (It's, that's, don't) stay one word; trailing punctuation stays outside the button.
+  return raw.replace(/[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*(?:[.:\-][A-Za-z0-9]+)*/g, (word) => {
+    if (!normTok(word)) return esc(word);
+    return '<button type="button" class="sent-word" data-act="say-word" data-word="' + esc(word) + '">' + esc(word) + "</button>";
+  });
 }
 function shuffle(arr) {
   const a = arr.slice();
@@ -241,7 +304,8 @@ function saveSession() {
       phase: round.phase,
       hints: round.hints,
       scored: round.scored,
-      misses: round.misses
+      misses: round.misses,
+      feedback: round.feedback || ""
     } : null
   });
 }
@@ -296,6 +360,7 @@ function stopPlayback() {
   try { player.pause(); } catch (e) {}
   if (window.speechSynthesis) speechSynthesis.cancel();
   setListening(false);
+  stopWordAudio();
 }
 function playUrl(url, start, end, token) {
   return new Promise((resolve) => {
@@ -422,22 +487,59 @@ function dealTiles(sentence) {
   }
   return order;
 }
+function slotCorrect(sentence, placed, pos) {
+  const idx = placed[pos];
+  if (idx == null) return false;
+  return normTok(sentence.tiles[idx]) === normTok(sentence.tiles[pos]);
+}
+function allLocked(locked) {
+  return Array.isArray(locked) && locked.length && locked.every(Boolean);
+}
+function migrateBoard(sentence, placedIn, bankIn, lockedIn) {
+  const n = sentence.tiles.length;
+  const bank = Array.isArray(bankIn) ? bankIn.map((i) => i | 0) : [];
+  if (Array.isArray(placedIn) && placedIn.length === n && Array.isArray(lockedIn) && lockedIn.length === n) {
+    return {
+      placed: placedIn.map((x) => (x == null || x === "" ? null : x | 0)),
+      bank: bank,
+      locked: lockedIn.map(Boolean)
+    };
+  }
+  const compact = Array.isArray(placedIn) ? placedIn.filter((x) => x != null).map((i) => i | 0) : [];
+  const placed = Array(n).fill(null);
+  compact.forEach((idx, pos) => { if (pos < n) placed[pos] = idx; });
+  const k = (lockedIn == null || Array.isArray(lockedIn)) ? 0 : (lockedIn | 0);
+  const locked = Array(n).fill(false);
+  for (let i = 0; i < k && i < n; i++) locked[i] = true;
+  return { placed: placed, bank: bank, locked: locked };
+}
 function sane(sentence, placed, bank, locked) {
   const n = sentence.tiles.length;
+  if (!Array.isArray(placed) || placed.length !== n) return false;
+  if (!Array.isArray(locked) || locked.length !== n) return false;
+  if (!Array.isArray(bank)) return false;
   const seen = new Set();
-  const ok = (arr) => arr.every((i) => i === (i | 0) && i >= 0 && i < n && !seen.has(i) && seen.add(i));
-  if (!ok(placed || []) || !ok(bank || []) || seen.size !== n) return false;
-  if (locked < 0 || locked > placed.length) return false;
-  for (let i = 0; i < locked; i++) if (placed[i] !== i) return false;
-  return true;
+  for (let i = 0; i < n; i++) {
+    const p = placed[i];
+    if (p == null) continue;
+    if (p !== (p | 0) || p < 0 || p >= n || seen.has(p)) return false;
+    seen.add(p);
+    if (locked[i] && !slotCorrect(sentence, placed, i)) return false;
+  }
+  for (let i = 0; i < bank.length; i++) {
+    const p = bank[i];
+    if (p !== (p | 0) || p < 0 || p >= n || seen.has(p)) return false;
+    seen.add(p);
+  }
+  return seen.size === n;
 }
 function beginAt(queue, index) {
   if (index >= queue.length) {
     round = {
       theme: ui.theme, level: ui.level, board: ui.board,
       queue: queue, index: index, sentence: null,
-      placed: [], bank: [], locked: 0, phase: "done",
-      hints: 0, scored: false, misses: 0, heard: ""
+      placed: [], bank: [], locked: [], phase: "done",
+      hints: 0, scored: false, misses: 0, heard: "", feedback: ""
     };
     ui.screen = "done";
     saveSession();
@@ -449,8 +551,10 @@ function beginAt(queue, index) {
   round = {
     theme: ui.theme, level: ui.level, board: ui.board,
     queue: queue, index: index, sentence: sentence,
-    placed: [], bank: dealTiles(sentence), locked: 0,
-    phase: "play", hints: 0, scored: false, misses: 0, heard: "", showZh: false
+    placed: Array(sentence.tiles.length).fill(null),
+    bank: dealTiles(sentence),
+    locked: Array(sentence.tiles.length).fill(false),
+    phase: "play", hints: 0, scored: false, misses: 0, heard: "", showZh: false, feedback: ""
   };
   ui.screen = "play";
   saveSession();
@@ -476,18 +580,23 @@ function onPlace(i) {
   i = i | 0;
   const at = round.bank.indexOf(i);
   if (at < 0) return;
+  const slot = round.placed.indexOf(null);
+  if (slot < 0) return;
   round.bank.splice(at, 1);
-  round.placed.push(i);
+  round.placed[slot] = i;
   if (round.phase === "wrong") round.phase = "play";
   saveSession();
   render();
+  playWord(round.sentence.tiles[i]);
 }
-function onUnplace(i) {
+function onUnplace(slot) {
   if (!round || !round.sentence || round.phase === "correct" || round.phase === "done") return;
-  i = i | 0;
-  const at = round.placed.indexOf(i);
-  if (at < 0 || at < round.locked) return;
-  round.placed.splice(at, 1);
+  slot = slot | 0;
+  if (slot < 0 || slot >= round.placed.length) return;
+  if (round.locked[slot]) return;
+  const i = round.placed[slot];
+  if (i == null) return;
+  round.placed[slot] = null;
   round.bank.push(i);
   if (round.phase === "wrong") round.phase = "play";
   saveSession();
@@ -496,38 +605,61 @@ function onUnplace(i) {
 function onHint() {
   if (!round || !round.sentence || round.phase === "correct" || round.phase === "done") return;
   const n = round.sentence.tiles.length;
-  if (round.locked >= n) return;
-  const need = round.locked;
-  round.placed = round.placed.filter((i) => i !== need);
-  round.bank = round.bank.filter((i) => i !== need);
-  round.placed.splice(round.locked, 0, need);
-  round.locked++;
+  const need = Array.isArray(round.locked) ? round.locked.findIndex((x) => !x) : 0;
+  if (need < 0 || need >= n) return;
+  const fromBank = round.bank.indexOf(need);
+  if (fromBank >= 0) round.bank.splice(fromBank, 1);
+  else {
+    const at = round.placed.indexOf(need);
+    if (at >= 0) {
+      if (round.locked[at]) return;
+      round.placed[at] = null;
+    }
+  }
+  const cur = round.placed[need];
+  if (cur != null && cur !== need) round.bank.push(cur);
+  round.placed[need] = need;
+  round.locked[need] = true;
   round.hints++;
   saveSession();
   render();
 }
 function onCheck() {
   if (!round || !round.sentence || round.phase === "correct" || round.phase === "done") return;
+  markBusy(800);
   const s = round.sentence;
-  if (round.placed.length < s.tiles.length) {
+  if (round.placed.some((x) => x == null)) {
     toast("Place every tile first. 请先放完所有词卡。");
     return;
   }
   const words = round.placed.map((i) => s.tiles[i]);
-  if (isCorrect(words, s)) onCorrect();
-  else {
-    round.phase = "wrong";
-    round.misses++;
-    stats.streak = 0;
-    const m = masteryOf(s.id);
-    m.miss = (m.miss || 0) + 1;
-    saveMastery();
-    saveStats();
-    saveSession();
-    render();
+  if (isCorrect(words, s)) {
+    round.feedback = "";
+    onCorrect();
+    return;
   }
+  round.misses++;
+  stats.streak = 0;
+  const m = masteryOf(s.id);
+  m.miss = (m.miss || 0) + 1;
+  for (let i = 0; i < s.tiles.length; i++) {
+    if (slotCorrect(s, round.placed, i)) {
+      round.locked[i] = true;
+      continue;
+    }
+    const tile = round.placed[i];
+    if (tile != null) round.bank.push(tile);
+    round.placed[i] = null;
+  }
+  round.phase = "play";
+  round.feedback = "fix";
+  saveMastery();
+  saveStats();
+  saveSession();
+  render();
 }
 function onCorrect() {
+  markBusy(800);
   const s = round.sentence;
   if (!round.scored) {
     round.scored = true;
@@ -578,7 +710,88 @@ function onTheme(id) {
   render();
 }
 let updateReloading = false;
+let updatePending = "";
+let updateApplyTimer = 0;
+let updatePollTimer = 0;
+let actionBusyUntil = 0;
 const AUDIO_CACHE = "sentence-puzzle-audio";
+const UPDATE_POLL_MS = 90000;
+const UPDATE_RETRY_MS = 3000;
+
+function markBusy(ms) {
+  actionBusyUntil = Math.max(actionBusyUntil, Date.now() + (ms || 500));
+}
+function audioIsPlaying() {
+  const playing = (el) => {
+    try { return !!(el && !el.paused && !el.ended); } catch (e) { return false; }
+  };
+  if (listening) return true;
+  if (playing(player) || playing(wordPlayer)) return true;
+  try { if (window.speechSynthesis && speechSynthesis.speaking) return true; } catch (e) {}
+  return false;
+}
+function inputIsFocused() {
+  const el = document.activeElement;
+  if (!el || el === document.body) return false;
+  const tag = (el.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") return true;
+  if (el.isContentEditable) return true;
+  return false;
+}
+function isUpdateBusy() {
+  if (Date.now() < actionBusyUntil) return true;
+  if (audioIsPlaying()) return true;
+  if (inputIsFocused()) return true;
+  return false;
+}
+function persistResume() {
+  try { saveSession(); } catch (e) {}
+  try {
+    const snap = {
+      screen: ui.screen,
+      theme: ui.theme,
+      level: ui.level,
+      board: ui.board,
+      id: round && round.sentence ? round.sentence.id : null,
+      index: round ? round.index : 0,
+      placed: round ? round.placed : null,
+      bank: round ? round.bank : null,
+      locked: round ? round.locked : null,
+      phase: round ? round.phase : "",
+      queue: round ? round.queue : null
+    };
+    const raw = JSON.stringify(snap);
+    sessionStorage.setItem("puzzle_resume", raw);
+    localStorage.setItem("puzzle_resume", raw);
+  } catch (e) {}
+}
+function applyPendingUpdate() {
+  if (!updatePending || updateReloading) return;
+  if (isUpdateBusy()) {
+    clearTimeout(updateApplyTimer);
+    updateApplyTimer = setTimeout(applyPendingUpdate, UPDATE_RETRY_MS);
+    return;
+  }
+  updateReloading = true;
+  persistResume();
+  toast("发现新版本，正在更新…");
+  setTimeout(() => location.reload(), 1500);
+}
+function notePendingUpdate(next, current) {
+  if (!next || next === current) return;
+  updatePending = next;
+  try {
+    sessionStorage.setItem("puzzle_updated", next);
+    sessionStorage.setItem("puzzle_updated_from", current);
+  } catch (e) {}
+  applyPendingUpdate();
+}
+function startUpdatePoll() {
+  if (updatePollTimer) clearInterval(updatePollTimer);
+  updatePollTimer = setInterval(() => {
+    if (document.visibilityState === "visible") checkUpdate(false);
+  }, UPDATE_POLL_MS);
+}
 
 function versionNewer(next, current) {
   if (next == null || current == null) return false;
@@ -608,19 +821,10 @@ async function checkUpdate(manual) {
     const m = await freshMeta();
     const cur = String((versionMeta && versionMeta.v) || VERSION_FALLBACK);
     const next = m && m.v != null ? String(m.v) : "";
+    if (reg) { try { await reg.update(); } catch (e) {} }
     if (next && next !== cur) {
-      toast("发现新版本，正在更新…");
-      updateReloading = true;
-      try {
-        sessionStorage.setItem("puzzle_updated", next);
-        sessionStorage.setItem("puzzle_updated_from", cur);
-      } catch (e) {}
-      if (reg) { try { await reg.update(); } catch (e) {} }
-      setTimeout(() => location.reload(), 1500);
-    } else {
-      if (reg) { try { await reg.update(); } catch (e) {} }
-      if (manual) toast("You're up to date. 已经是最新版本");
-    }
+      notePendingUpdate(next, cur);
+    } else if (manual) toast("You're up to date. 已经是最新版本");
   } catch (e) {
     if (manual) toast("No network. Try again later. 没有网络，稍后再试");
   }
@@ -642,6 +846,7 @@ async function forceUpdate() {
     sessionStorage.setItem("puzzle_updated", "force");
     sessionStorage.setItem("puzzle_updated_from", cur);
   } catch (e) {}
+  persistResume();
   location.reload();
 }
 let toastTimer = 0;
@@ -682,8 +887,19 @@ function syncSettingsUI() {
     el.classList.toggle("on", on);
     el.setAttribute("aria-checked", on ? "true" : "false");
   });
+  const audioBtn = root.querySelector("[data-act=word-audio]");
+  if (audioBtn) {
+    const on = wordAudioOn();
+    audioBtn.classList.toggle("on", on);
+    audioBtn.setAttribute("aria-checked", on ? "true" : "false");
+  }
   const gear = document.querySelector(".gear");
   if (gear) gear.setAttribute("aria-expanded", settingsOpen ? "true" : "false");
+}
+function onWordAudioToggle() {
+  setWordAudio(!wordAudioOn());
+  syncSettingsUI();
+  if (ui.screen === "play" && round && round.phase === "correct") render();
 }
 function openSettings() {
   settingsOpen = true;
@@ -804,7 +1020,7 @@ function playMain() {
     const heard = round.heard ? heardLabel(round.heard, s.voice) : (plan.en + " · " + plan.zh);
     return prog +
       '<div class="msg good">That\'s right.<span class="zh">正确。</span></div>' +
-      '<div class="result"><div class="oktag">CORRECT</div><p class="sent">' + esc(s.english) + "</p>" +
+      '<div class="result"><div class="oktag">CORRECT</div><p class="sent">' + sentenceWordsHTML(s.english) + "</p>" +
       '<p class="cn">' + esc(s.chinese) + "</p>" +
       '<button class="replay" type="button" data-act="replay">▶ Replay · 再听一遍</button>' +
       '<p class="heard" id="heard">' + esc(heard) + "</p></div>" +
@@ -813,22 +1029,23 @@ function playMain() {
       "<div><b>" + num + "/" + total + "</b><span>Progress 进度</span></div></div>";
   }
   let msg = "";
-  if (round.phase === "wrong") {
-    msg = '<div class="msg bad">Some tiles are in the wrong place.<span class="zh">有的词卡位置不对。再试一次，或点「提示下一个词」锁定下一个正确的词。</span></div>';
+  if (round.feedback === "fix") {
+    msg = '<div class="msg bad">Wrong tiles went back to the bank. Correct tiles stay locked.<span class="zh">错的词卡已放回词库，对的已锁定在原位。把空位从词库补上再检查。</span></div>';
   }
-  const placed = round.placed.map((index, pos) => {
-    const locked = pos < round.locked;
+  const placed = s.tiles.map((_, pos) => {
+    const index = round.placed[pos];
+    if (index == null) return '<span class="slot"></span>';
+    const locked = !!round.locked[pos];
     const word = s.tiles[index];
-    const canon = s.tiles[pos];
-    const wrong = round.phase === "wrong" && !locked && word !== canon;
-    const cls = "tile" + (locked ? " locked" : "") + (wrong ? " wrong" : "");
-    return '<button type="button" class="' + cls + '" data-act="unplace" data-i="' + index + '">' + esc(word) + "</button>";
+    const cls = "tile" + (locked ? " locked" : "");
+    return '<button type="button" class="' + cls + '" data-act="unplace" data-slot="' + pos + '">' + esc(word) + "</button>";
   }).join("");
-  const slots = new Array(s.tiles.length - round.placed.length).fill('<span class="slot"></span>').join("");
   const bank = round.bank.map((index) => (
     '<button type="button" class="tile" data-act="place" data-i="' + index + '">' + esc(s.tiles[index]) + "</button>"
   )).join("");
-  const gold = round.locked ? '<p class="muted">Gold tile is locked. <span class="zh">金色词卡已锁定（提示下一个词）。</span></p>' : "";
+  const gold = (round.locked && round.locked.some(Boolean))
+    ? '<p class="muted">Locked tiles stay in place. <span class="zh">锁定的词卡已固定。</span></p>'
+    : "";
   const zhOpen = !!round.showZh;
   const zhText = s.chinese || s.zh || "";
   const meaning = '<div class="meaning"><button type="button" class="meaning-btn" data-act="zh" aria-expanded="' +
@@ -843,7 +1060,7 @@ function playMain() {
   return prog +
     '<div class="prompt"><div class="prompt-row"><b>Put the tiles in order</b>' + listenBtn + '</div>' +
     '<div class="zh">Tap a tile to place it. Tap a placed tile to take it out. 点选排序，再点可撤回。</div></div>' +
-    msg + '<div class="board-play"><div class="slots">' + placed + slots + "</div></div>" +
+    msg + '<div class="board-play"><div class="slots">' + placed + "</div></div>" +
     '<div class="bank">' + bank + "</div>" + gold + meaning;
 }
 function doneMain() {
@@ -863,10 +1080,8 @@ function dockHTML() {
     return '<button class="wide primary" type="button" data-act="next">' + label + "</button>";
   }
   if (ui.screen === "play" && round) {
-    const primary = round.phase === "wrong"
-      ? '<button class="btn primary" type="button" data-act="retry">Retry · 再试一次</button>'
-      : '<button class="btn primary" type="button" data-act="check">Check · 检查</button>';
-    const off = round.locked >= round.sentence.tiles.length ? " disabled" : "";
+    const primary = '<button class="btn primary" type="button" data-act="check">Check · 检查</button>';
+    const off = allLocked(round.locked) ? " disabled" : "";
     return '<div class="actions">' + primary +
       '<button class="btn ghost" type="button" data-act="hint"' + off + '>Next word<span class="z">提示下一个词</span></button></div>';
   }
@@ -913,23 +1128,46 @@ function restore(data) {
   if (!saved || !saved.queue) return;
   const sentence = saved.id ? findSentence(saved.id) : null;
   if (saved.phase !== "done" && !sentence) return;
-  if (sentence && !sane(sentence, saved.placed || [], saved.bank || [], saved.locked | 0)) {
-    round = {
-      theme: saved.theme || ui.theme,
-      level: saved.level || ui.level,
-      board: saved.board || ui.board,
-      queue: saved.queue,
-      index: saved.index | 0,
-      sentence: sentence,
-      placed: [],
-      bank: dealTiles(sentence),
-      locked: 0,
-      phase: saved.scored ? "correct" : "play",
-      hints: saved.hints | 0,
-      scored: !!saved.scored,
-      misses: saved.misses | 0,
-      heard: ""
-    };
+  if (sentence) {
+    const board = migrateBoard(sentence, saved.placed || [], saved.bank || [], saved.locked);
+    if (!sane(sentence, board.placed, board.bank, board.locked)) {
+      round = {
+        theme: saved.theme || ui.theme,
+        level: saved.level || ui.level,
+        board: saved.board || ui.board,
+        queue: saved.queue,
+        index: saved.index | 0,
+        sentence: sentence,
+        placed: Array(sentence.tiles.length).fill(null),
+        bank: dealTiles(sentence),
+        locked: Array(sentence.tiles.length).fill(false),
+        phase: saved.scored ? "correct" : "play",
+        hints: saved.hints | 0,
+        scored: !!saved.scored,
+        misses: saved.misses | 0,
+        heard: "",
+        feedback: ""
+      };
+    } else {
+      const phase = saved.phase === "wrong" ? "play" : (saved.phase || "play");
+      round = {
+        theme: saved.theme || ui.theme,
+        level: saved.level || ui.level,
+        board: saved.board || ui.board,
+        queue: saved.queue,
+        index: saved.index | 0,
+        sentence: sentence,
+        placed: board.placed,
+        bank: board.bank,
+        locked: board.locked,
+        phase: phase,
+        hints: saved.hints | 0,
+        scored: !!saved.scored,
+        misses: saved.misses | 0,
+        heard: "",
+        feedback: saved.feedback || (phase === "play" && board.placed.some((x) => x == null) && board.locked.some(Boolean) ? "fix" : "")
+      };
+    }
   } else {
     round = {
       theme: saved.theme || ui.theme,
@@ -940,12 +1178,13 @@ function restore(data) {
       sentence: sentence,
       placed: saved.placed || [],
       bank: saved.bank || [],
-      locked: saved.locked | 0,
+      locked: Array.isArray(saved.locked) ? saved.locked : [],
       phase: saved.phase || "play",
       hints: saved.hints | 0,
       scored: !!saved.scored,
       misses: saved.misses | 0,
-      heard: ""
+      heard: "",
+      feedback: ""
     };
   }
   if (data.screen === "play" || data.screen === "done") ui.screen = data.screen;
@@ -968,6 +1207,8 @@ function bind() {
     if (act === "settings") { settingsOpen ? closeSettings() : openSettings(); return; }
     if (act === "settings-close") { closeSettings(); return; }
     if (act === "appearance") { onAppearance(b.dataset.id); return; }
+    if (act === "word-audio") { onWordAudioToggle(); return; }
+    if (act === "say-word") { playWord(b.dataset.word || b.textContent, b); return; }
     if (act === "theme") onTheme(b.dataset.id);
     else if (act === "level") { ui.level = b.dataset.id | 0; ui.screen = "home"; render(); }
     else if (act === "board") { ui.board = b.dataset.id; ui.screen = "home"; render(); }
@@ -985,7 +1226,7 @@ function bind() {
     else if (act === "retry") onRetry();
     else if (act === "next") onNext();
     else if (act === "place") onPlace(b.dataset.i);
-    else if (act === "unplace") onUnplace(b.dataset.i);
+    else if (act === "unplace") onUnplace(b.dataset.slot);
     else if (act === "replay") {
       if (round && round.sentence) {
         const s = round.sentence;
@@ -1004,9 +1245,10 @@ function registerSW() {
   sw.addEventListener("controllerchange", () => {
     // Reload only if a controller already existed (a new worker took over).
     // First claim must not reload, and must not set the 已更新 flag.
+    // Mid-action / audio / focused input: defer via the pending updater.
     if (had && !updateReloading) {
-      updateReloading = true;
-      location.reload();
+      const cur = String((versionMeta && versionMeta.v) || VERSION_FALLBACK);
+      notePendingUpdate(updatePending || cur, cur);
     }
   });
   const v = (versionMeta && versionMeta.v) || VERSION_FALLBACK;
@@ -1068,11 +1310,29 @@ async function boot() {
       const shown = String(versionMeta.v || "");
       // Only toast after a real version bump. First SW claim and force-same-version must stay quiet.
       if (fromVersion && shown && versionNewer(shown, fromVersion)) {
-        setTimeout(() => toast("Updated. 已更新 ✓ v" + shown), 400);
+        setTimeout(() => toast("已更新到最新版"), 400);
       }
     }
     if (versionMeta.v) localStorage.setItem("puzzle_v", String(versionMeta.v));
   } catch (e) {}
   registerSW();
+  startUpdatePoll();
+  try {
+    window.__puzzleCheckUpdate = () => checkUpdate(false);
+    window.__puzzleIsBusy = isUpdateBusy;
+    window.__puzzlePendingUpdate = () => updatePending;
+    window.__puzzleTestHoldAudio = async (on, url) => {
+      if (!on) {
+        try { wordPlayer.loop = false; } catch (e) {}
+        stopWordAudio();
+        applyPendingUpdate();
+        return;
+      }
+      wordPlayer.loop = true;
+      wordPlayer.src = url;
+      markBusy(200);
+      await wordPlayer.play();
+    };
+  } catch (e) {}
 }
 boot();
