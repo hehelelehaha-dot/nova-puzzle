@@ -937,7 +937,8 @@ html[data-theme="dark"] .settings-sheet { box-shadow: 0 -12px 40px rgba(0, 0, 0,
 .audio-toggle.on .switch { background: var(--accent); }
 .audio-toggle.on .switch::after { transform: translateX(18px); }
 
-.result .sent-word {
+.result .sent-word,
+.ask .sent-word {
   display: inline;
   margin: 0;
   padding: 0;
@@ -954,12 +955,14 @@ html[data-theme="dark"] .settings-sheet { box-shadow: 0 -12px 40px rgba(0, 0, 0,
   text-decoration: none;
   text-underline-offset: 0.12em;
 }
-.result .sent-word:active {
+.result .sent-word:active,
+.ask .sent-word:active {
   text-decoration: underline;
   text-decoration-thickness: 2px;
   text-decoration-color: color-mix(in srgb, var(--accent) 75%, transparent);
 }
-.result .sent-word.on {
+.result .sent-word.on,
+.ask .sent-word.on {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   text-decoration: underline;
   text-decoration-thickness: 2px;
@@ -970,3 +973,56 @@ html[data-theme="dark"] .settings-sheet { box-shadow: 0 -12px 40px rgba(0, 0, 0,
 
 
 button, .tile, label[data-hx] { touch-action: manipulation; }
+
+/* Interview: the interviewer's question above the puzzle */
+.ask {
+  background: var(--card);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+  padding: 12px 16px 12px;
+  margin: 0 0 14px;
+  border-left: 4px solid var(--accent);
+  animation: rise .4s ease-out both;
+}
+main.arrange .ask { flex-shrink: 0; }
+.ask-k {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--mut);
+  letter-spacing: .02em;
+}
+.ask-play {
+  margin-left: auto;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--chip);
+  color: var(--ink);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: manipulation;
+}
+.ask-play:active { transform: scale(0.94); }
+.ask-q {
+  margin: 4px 0 0;
+  font-family: var(--en);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+.ask-q.ask-ctx { font-size: 17px; font-style: italic; }
+.ask-zh {
+  margin: 6px 0 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--mut);
+}

@@ -3,7 +3,7 @@
 // Playback: sentence.audio (Fish voice-over), then oa (original), then a (Kokoro), then Web Speech.
 // Naval sentences come from naval.json. Scary and Naval mp3s live under audio/ and are cached on first play.
 
-const VERSION_FALLBACK = "11";
+const VERSION_FALLBACK = "12";
 const STATS_KEY = "puzzle_stats";
 const MASTERY_KEY = "puzzle_mastery";
 const SESSION_KEY = "puzzle_session";
@@ -16,6 +16,7 @@ const THEMES = [
   { id: "All", en: "All", zh: "全部" },
   { id: "Lash", en: "Lash", zh: "美睫" },
   { id: "Dealer", en: "Dealer", zh: "发牌" },
+  { id: "Interview", en: "Interview", zh: "面试" },
   { id: "Daily", en: "Daily", zh: "日常" },
   { id: "Scary", en: "Scary", zh: "惊悚" },
   { id: "Naval", en: "Naval", zh: "原句" }
@@ -28,7 +29,7 @@ const LEVELS = [
   { id: 5, en: "Prepositions", zh: "介词" },
   { id: 6, en: "Clauses", zh: "从句长句" }
 ];
-const THEME_ZH = { Lash: "美睫", Dealer: "发牌", Daily: "日常", Scary: "惊悚", Naval: "Naval", All: "全部" };
+const THEME_ZH = { Lash: "美睫", Dealer: "发牌", Interview: "面试", Daily: "日常", Scary: "惊悚", Naval: "Naval", All: "全部" };
 
 let versionMeta = { v: VERSION_FALLBACK, built: "2026-11-22" };
 let reg = null;
@@ -237,7 +238,12 @@ function normalize(s) {
     sourceFile: s.sourceFile || "",
     sourceTitle: s.sourceTitle || "",
     board: s.board || s.sourceFile || "",
-    boardTitle: s.boardTitle || s.sourceTitle || ""
+    boardTitle: s.boardTitle || s.sourceTitle || "",
+    q: s.q || "",
+    qZh: s.qZh || "",
+    qAudio: s.qAudio || "",
+    context: s.context || "",
+    contextZh: s.contextZh || ""
   };
 }
 function reindex() {
@@ -270,6 +276,16 @@ function navalBoards() {
   });
   return Array.from(map.values());
 }
+function interviewBoards() {
+  const map = new Map();
+  BANK.forEach((s) => {
+    if (s.theme !== "Interview" || !isPlayable(s)) return;
+    const id = s.board || s.id;
+    if (!map.has(id)) map.set(id, { id, title: s.boardTitle || id, n: 0 });
+    map.get(id).n++;
+  });
+  return Array.from(map.values());
+}
 function splitTitle(title) {
   const parts = String(title || "").split(" · ");
   return { en: parts[0] || title, zh: parts.slice(1).join(" · ") };
@@ -286,10 +302,16 @@ function selection() {
     if (ui.board && ui.board !== "all") list = list.filter((s) => (s.sourceFile || s.board) === ui.board);
     return list;
   }
+  if (ui.theme === "Interview") {
+    if (ui.board && ui.board !== "all") list = list.filter((s) => s.board === ui.board);
+    return list;
+  }
   return list.filter((s) => s.level === ui.level);
 }
 function keepOrder() {
   if (ui.theme === "Naval") return true;
+  // Interview runs in PDF order, question by question, like a mock interview.
+  if (ui.theme === "Interview") return true;
   if (ui.theme === "Scary" && ui.board && ui.board !== "all") return true;
   return false;
 }
@@ -955,7 +977,11 @@ function headerHTML() {
   const theme = round ? round.theme : ui.theme;
   const zh = THEME_ZH[theme] || "";
   let sub = zh;
-  if (theme === "Scary" || theme === "Naval") {
+  if (theme === "Interview") {
+    const title = round && round.sentence ? (round.sentence.boardTitle || "") : "";
+    const name = title ? title.split(" · ")[0] : "All parts";
+    sub = (zh ? zh + " · " : "") + name;
+  } else if (theme === "Scary" || theme === "Naval") {
     const title = round && round.sentence ? (round.sentence.boardTitle || "") : "";
     const name = title ? splitTitle(title).en : (ui.board === "all" ? "All stories" : "");
     sub = (zh ? zh + " · " : "") + (name || "Stories");
@@ -1005,6 +1031,14 @@ function homeMain() {
     const total = boards.reduce((n, b) => n + b.n, 0);
     picker = '<div class="sec">Story<small>Grouped by story. 按故事分组，不按难度。</small></div>' +
       boardList(boards, "All stories", "全部故事", total);
+  } else if (ui.theme === "Interview") {
+    const boards = interviewBoards();
+    const total = boards.reduce((n, b) => n + b.n, 0);
+    picker = '<div class="sec">Part<small>Turning Stone dealer interview. 按 Part 分组，按顺序练。</small></div>' +
+      boardList(boards.map((b) => {
+        const t = String(b.title).split(" · ");
+        return { id: b.id, n: b.n, title: t[0] + " – " + (t[1] || "") + " · " + t.slice(2).join(" · ") };
+      }), "All parts", "全部", total);
   } else if (ui.theme === "Naval") {
     if (!navalLoaded) {
       picker = '<p class="loading">Couldn\'t load Naval. 读不到 Naval。</p>';
@@ -1033,6 +1067,30 @@ function homeMain() {
     '<div class="zh">最高连对 · 已掌握</div>' +
     '<div class="note">' + esc(note) + "</div></div>";
 }
+const ASK_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>';
+function askHTML(s, showZh) {
+  if (s.q) {
+    const btn = s.qAudio
+      ? '<button type="button" class="ask-play" data-act="ask" aria-label="听问题 Play question">' + ASK_SVG + "</button>"
+      : "";
+    return '<div class="ask"><div class="ask-k">Interviewer asks · 面试官问' + btn + "</div>" +
+      '<p class="ask-q">' + sentenceWordsHTML(s.q) + "</p>" +
+      (showZh && s.qZh ? '<p class="ask-zh">' + esc(s.qZh) + "</p>" : "") + "</div>";
+  }
+  if (s.context) {
+    return '<div class="ask"><div class="ask-k">When to say it · 什么时候说</div>' +
+      '<p class="ask-q ask-ctx">' + esc(s.context) + "</p>" +
+      (showZh && s.contextZh ? '<p class="ask-zh">' + esc(s.contextZh) + "</p>" : "") + "</div>";
+  }
+  return "";
+}
+function onAsk() {
+  if (!round || !round.sentence || !round.sentence.qAudio) return;
+  stopPlayback();
+  markBusy(600);
+  const token = ++playToken;
+  playUrl(localAudioURL(round.sentence.qAudio), null, null, token);
+}
 function playMain() {
   const s = round.sentence;
   const total = round.queue.length;
@@ -1044,6 +1102,7 @@ function playMain() {
     const heard = round.heard ? heardLabel(round.heard, s.voice) : (plan.en + " · " + plan.zh);
     return prog +
       '<div class="msg good">That\'s right.<span class="zh">正确。</span></div>' +
+      askHTML(s, true) +
       '<div class="result"><div class="oktag">CORRECT</div><p class="sent">' + sentenceWordsHTML(s.english) + "</p>" +
       '<p class="cn">' + esc(s.chinese) + "</p>" +
       '<button class="replay" type="button" data-act="replay">▶ Replay · 再听一遍</button>' +
@@ -1078,7 +1137,7 @@ function playMain() {
       (listening ? "停止播放 Stop" : "播放原音 Play audio") + '" aria-pressed="' + (listening ? "true" : "false") + '">' +
       SPEAKER_SVG + "</button>"
     : "";
-  return prog +
+  return prog + askHTML(s, zhOpen) +
     '<div class="prompt"><div class="prompt-row"><b>Put the tiles in order</b>' + listenBtn + '</div>' +
     '<div class="zh">Tap a tile to place it. Tap a placed tile to take it out. 点选排序，再点可撤回。</div></div>' +
     msg + '<div class="board-play"><div class="slots">' + placed + "</div></div>" +
@@ -1239,6 +1298,7 @@ function bind() {
     else if (act === "check") onCheck();
     else if (act === "hint") onHint();
     else if (act === "listen") onListen();
+    else if (act === "ask") onAsk();
     else if (act === "zh") {
       if (round && round.sentence && round.phase !== "correct" && round.phase !== "done") {
         round.showZh = !round.showZh;
