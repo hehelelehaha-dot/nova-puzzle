@@ -111,22 +111,21 @@
   }
 
   /* Swallow the label click, the forwarded switch click, and any delayed ghost click
-     at the same spot so only the one replayed host.click() reaches the app. */
+     at the same spot so only the one replayed host.click() reaches the app.
+     The ghost click is hit-tested again after the UI updates, so it may land on
+     whatever just appeared there (a new tile, or the settings backdrop). A real
+     second tap clears this lock on pointerdown. */
   function onClickCapture(e) {
     var t = e.target;
     if (!t || !t.matches) return;
     if (t.matches("input[data-hx-sw]")) { e.stopImmediatePropagation(); return; }
     if (replaying) return; // our host.click() replay — do not swallow it
 
-    var lab = labelOf(t);
     if (recentlyHandled(e)) {
-      if (lab || t.matches("input[data-hx-sw]")) e.stopImmediatePropagation();
-      else if (lab === null && t.closest && t.closest(TAP)) {
-        // Ghost click on a (possibly new) tile at the same coordinates after a re-render.
-        e.stopImmediatePropagation();
-      }
+      e.stopImmediatePropagation();
       return;
     }
+    var lab = labelOf(t);
     if (!lab) return;
     e.stopImmediatePropagation();
     var host = lab.parentElement;
@@ -134,7 +133,6 @@
       markHandled(e);
       replay(host);
     }
-    // Do not park a detached label on the body — a delayed click could still hit it.
   }
 
   function armIOS(el) {
@@ -146,11 +144,11 @@
     sw.type = "checkbox"; sw.setAttribute("switch", ""); sw.setAttribute("data-hx-sw", ""); sw.tabIndex = -1;
     sw.style.cssText = "position:absolute;left:0;top:0;width:1px;height:1px;margin:0;opacity:0;pointer-events:none";
     lab.appendChild(sw);
-    if (getComputedStyle(el).position === "static") el.style.position = "relative";
-    el.style.touchAction = "manipulation";
+    // Position and touch-action live in CSS. Reading getComputedStyle here forced a
+    // layout on every new button, which is what made a tile tap feel stuck.
     el.querySelectorAll(LIFT).forEach(function (c) {      // inner controls (e.g. 🔊 on a word card) stay tappable
       if (c.closest("label[data-hx]")) return;
-      if (getComputedStyle(c).position === "static") c.style.position = "relative";
+      if (!c.style.position) c.style.position = "relative";
       if (!c.style.zIndex) c.style.zIndex = "1";
     });
     el.appendChild(lab);
@@ -164,25 +162,26 @@
     d.querySelectorAll("label[data-hx]").forEach(function (l) { l.remove(); });
   }
   function hostOf(n) { return n && n.nodeType === 1 ? n.closest(TAP) : null; }
+  var syncScheduled = false;
   function syncLabels() {
     if (!on || !isIOS) return;
     d.querySelectorAll(TAP).forEach(function (el) {
       if (el.closest(SKIP) || el.closest("label[data-hx]")) return;
-      var lab = el.querySelector(":scope > label[data-hx]");
-      if (!lab) { armIOS(el); return; }
-      if (getComputedStyle(el).position === "static") el.style.position = "relative";
-      lab.style.position = "absolute";
-      lab.style.inset = "0";
-      lab.style.touchAction = "manipulation";
+      if (!el.querySelector(":scope > label[data-hx]")) armIOS(el);
     });
+  }
+  function scheduleSync() {
+    if (syncScheduled) return;
+    syncScheduled = true;
+    requestAnimationFrame(function () { syncScheduled = false; syncLabels(); });
   }
   function unbind() {
     d.removeEventListener("pointerdown", onDown, true);
     w.removeEventListener("click", onClickCapture, true);
     w.removeEventListener("pointerup", onPointerUpCapture, true);
     w.removeEventListener("pointerdown", onPointerDownClear, true);
-    w.removeEventListener("resize", syncLabels);
-    if (w.visualViewport) w.visualViewport.removeEventListener("resize", syncLabels);
+    w.removeEventListener("resize", scheduleSync);
+    if (w.visualViewport) w.visualViewport.removeEventListener("resize", scheduleSync);
     if (mo) { mo.disconnect(); mo = null; }
     if (ro) { ro.disconnect(); ro = null; }
   }
@@ -211,13 +210,13 @@
       });
       mo.observe(d.body, { childList: true, subtree: true });
       if (typeof ResizeObserver === "function") {
-        ro = new ResizeObserver(function () { syncLabels(); });
+        ro = new ResizeObserver(function () { scheduleSync(); });
         ro.observe(d.body);
         var app = d.getElementById("app") || d.getElementById("main");
         if (app) ro.observe(app);
       }
-      w.addEventListener("resize", syncLabels);
-      if (w.visualViewport) w.visualViewport.addEventListener("resize", syncLabels);
+      w.addEventListener("resize", scheduleSync);
+      if (w.visualViewport) w.visualViewport.addEventListener("resize", scheduleSync);
     },
     stop: function () {
       on = false;

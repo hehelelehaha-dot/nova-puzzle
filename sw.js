@@ -1,7 +1,7 @@
 // Sentence Puzzle service worker. Register with scope "./".
 // Cache name is unique to this app. Version must match meta.json "v".
 // Shell lives in a versioned cache; audio lives in a long-lived cache.
-const V = "12";
+const V = "13";
 const PREFIX = "sentence-puzzle-";
 const SHELL = PREFIX + V;
 const MEDIA = PREFIX + "audio";
@@ -98,6 +98,27 @@ async function migrateAudio(oldName) {
   } catch (e) {}
 }
 
+// Range responses used to copy the whole clip on every tap. Keep a few decoded
+// bodies in memory so a replay (or a byte-range play) does not read the cache again.
+const audioBytes = new Map();
+const AUDIO_BYTE_CAP = 16;
+async function bytesOf(url, cached) {
+  const key = url.href;
+  const hit = audioBytes.get(key);
+  if (hit) {
+    audioBytes.delete(key);
+    audioBytes.set(key, hit);
+    return hit;
+  }
+  const buf = await cached.arrayBuffer();
+  audioBytes.set(key, buf);
+  while (audioBytes.size > AUDIO_BYTE_CAP) {
+    const oldest = audioBytes.keys().next().value;
+    audioBytes.delete(oldest);
+  }
+  return buf;
+}
+
 function audioHeaders(cached, length) {
   const headers = new Headers();
   headers.set("Content-Type", cached.headers.get("content-type") || "audio/mpeg");
@@ -106,8 +127,8 @@ function audioHeaders(cached, length) {
   return headers;
 }
 
-async function fulfillRange(req, cached) {
-  const buf = await cached.arrayBuffer();
+async function fulfillRange(req, url, cached) {
+  const buf = await bytesOf(url, cached);
   const size = buf.byteLength;
   const header = (req.headers.get("range") || "").trim();
   const match = /^bytes=(\d*)-(\d*)$/.exec(header);
@@ -217,7 +238,7 @@ async function fromAudio(event, req, url) {
       try { await cache.put(url.href, fresh.clone()); } catch (err) {}
       hit = fresh;
     }
-    if (req.headers.has("range")) return fulfillRange(req, hit.clone());
+    if (req.headers.has("range")) return fulfillRange(req, url, hit.clone());
     return hit;
   } catch (err) {
     try { return await fetch(req); } catch (e2) { return Response.error(); }
