@@ -3,7 +3,7 @@
 // Playback: sentence.audio (Fish voice-over), then oa (original), then a (Kokoro), then Web Speech.
 // Naval sentences come from naval.json. Scary and Naval mp3s live under audio/ and are cached on first play.
 
-const VERSION_FALLBACK = "12";
+const VERSION_FALLBACK = "13";
 const STATS_KEY = "puzzle_stats";
 const MASTERY_KEY = "puzzle_mastery";
 const SESSION_KEY = "puzzle_session";
@@ -73,10 +73,11 @@ function writeJSON(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); }
   catch (e) { storageOk = false; }
 }
+const nyFmt = new Intl.DateTimeFormat("en-CA", {
+  timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit"
+});
 function nyToday(date) {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit"
-  }).format(date || new Date());
+  return nyFmt.format(date || new Date());
 }
 function loadDays() {
   const v = readJSON(DAYS_KEY);
@@ -142,6 +143,10 @@ function wordAudioUrl(w) {
   const slug = wordSlug(w);
   return slug ? ("words/" + encodeURIComponent(slug) + ".mp3") : "";
 }
+function wordAudioAbs(w) {
+  const rel = wordAudioUrl(w);
+  return rel ? localAudioURL(rel) : "";
+}
 function wordAudioOn() {
   try {
     const v = localStorage.getItem(WORD_AUDIO_KEY);
@@ -168,22 +173,140 @@ function setHaptics(on) {
 function clearWordHighlight() {
   document.querySelectorAll(".sent-word.on").forEach((el) => el.classList.remove("on"));
 }
+
+// Decoded clips for the sentence on screen. A tap then starts the buffer in the
+// same turn instead of fetching and decoding the mp3 again.
+const audioBuffers = new Map();
+const audioInflight = new Map();
+const warmQueue = [];
+const warmQueued = new Set();
+let warmScheduled = false;
+let decodeChain = Promise.resolve();
+let audioCtx = null;
+let wordSource = null;
+let sentenceSource = null;
+const AUDIO_BUFFER_CAP = 96;
+
+function audioContext() {
+  if (audioCtx) return audioCtx;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  try { audioCtx = new AC(); } catch (e) { return null; }
+  return audioCtx;
+}
+function unlockAudio() {
+  const ctx = audioContext();
+  if (ctx && ctx.state === "suspended") {
+    try { ctx.resume().catch(() => {}); } catch (e) {}
+  }
+}
+function decodeOne(ctx, raw) {
+  const run = decodeChain.then(() => new Promise((res) => setTimeout(res, 0))).then(() => ctx.decodeAudioData(raw.slice(0)));
+  decodeChain = run.then(() => {}, () => {});
+  return run;
+}
+function rememberBuffer(url, buf) {
+  if (audioBuffers.has(url)) audioBuffers.delete(url);
+  audioBuffers.set(url, buf);
+  while (audioBuffers.size > AUDIO_BUFFER_CAP) {
+    audioBuffers.delete(audioBuffers.keys().next().value);
+  }
+}
+function loadBuffer(url) {
+  if (!url) return Promise.resolve(null);
+  if (audioBuffers.has(url)) return Promise.resolve(audioBuffers.get(url));
+  const pending = audioInflight.get(url);
+  if (pending) return pending;
+  const ctx = audioContext();
+  if (!ctx) return Promise.resolve(null);
+  const p = fetch(url).then((res) => {
+    if (!res.ok) throw new Error(String(res.status));
+    return res.arrayBuffer();
+  }).then((raw) => decodeOne(ctx, raw)).then((buf) => {
+    rememberBuffer(url, buf);
+    return buf;
+  }).catch(() => null);
+  audioInflight.set(url, p);
+  const clear = () => { if (audioInflight.get(url) === p) audioInflight.delete(url); };
+  p.then(clear, clear);
+  return p;
+}
+function scheduleWarm() {
+  if (warmScheduled || !warmQueue.length) return;
+  warmScheduled = true;
+  setTimeout(() => {
+    warmScheduled = false;
+    let n = 0;
+    while (n < 6 && warmQueue.length) {
+      n++;
+      const url = warmQueue.shift();
+      warmQueued.delete(url);
+      loadBuffer(url);
+    }
+    if (warmQueue.length) scheduleWarm();
+  }, 0);
+}
+function enqueueWarm(urls) {
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    if (!url || audioBuffers.has(url) || warmQueued.has(url) || audioInflight.has(url)) continue;
+    warmQueued.add(url);
+    warmQueue.push(url);
+  }
+  scheduleWarm();
+}
+function wordsIn(text, into) {
+  const re = /[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*(?:[.:\-][A-Za-z0-9]+)*/g;
+  const raw = String(text || "");
+  let m;
+  while ((m = re.exec(raw))) {
+    const url = wordAudioAbs(m[0]);
+    if (url) into.push(url);
+  }
+}
+function warmSentence(s) {
+  if (!s) return;
+  const urls = [];
+  if (wordAudioOn()) {
+    const tiles = s.tiles || [];
+    for (let i = 0; i < tiles.length; i++) {
+      const url = wordAudioAbs(tiles[i]);
+      if (url) urls.push(url);
+    }
+    wordsIn(s.q, urls);
+    wordsIn(s.english, urls);
+  }
+  const field = audioField(s);
+  if (field && field.url) urls.push(resolveAudioURL(field.url));
+  else if (s.oa) urls.push(clipUrl(s.oa));
+  if (s.a && s.a !== s.oa) urls.push(clipUrl(s.a));
+  if (s.qAudio) urls.push(localAudioURL(s.qAudio));
+  enqueueWarm(urls);
+}
+function stopNode(src) {
+  if (!src) return;
+  try { src.onended = null; } catch (e) {}
+  try { src.stop(); } catch (e) {}
+  try { src.disconnect(); } catch (e) {}
+}
+function stopWordSource() {
+  const src = wordSource;
+  wordSource = null;
+  stopNode(src);
+}
+function stopSentenceSource() {
+  const src = sentenceSource;
+  sentenceSource = null;
+  stopNode(src);
+}
 function stopWordAudio() {
   wordPlayToken++;
+  stopWordSource();
   try { wordPlayer.pause(); } catch (e) {}
   try { wordPlayer.removeAttribute("src"); wordPlayer.load(); } catch (e) {}
   clearWordHighlight();
 }
-function playWord(word, el) {
-  if (!wordAudioOn()) return;
-  markBusy(400);
-  const url = wordAudioUrl(word);
-  if (!url) return;
-  const token = ++wordPlayToken;
-  clearWordHighlight();
-  if (el) el.classList.add("on");
-  try { player.pause(); } catch (e) {}
-  setListening(false);
+function playWordElement(url, token, el) {
   try { wordPlayer.pause(); } catch (e) {}
   wordPlayer.onended = () => {
     if (token !== wordPlayToken) return;
@@ -193,9 +316,54 @@ function playWord(word, el) {
     if (token !== wordPlayToken) return;
     if (el) el.classList.remove("on");
   };
-  wordPlayer.src = url;
+  try { wordPlayer.src = url; } catch (e) { return; }
   const p = wordPlayer.play();
   if (p && p.catch) p.catch(() => { if (token === wordPlayToken && el) el.classList.remove("on"); });
+}
+function playWordBuffer(url, token, el) {
+  const buf = audioBuffers.get(url);
+  const ctx = audioContext();
+  if (!buf || !ctx) return false;
+  let src;
+  try {
+    if (ctx.state !== "running") { const r = ctx.resume(); if (r && r.catch) r.catch(() => {}); }
+    src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    src.start(0);
+  } catch (e) {
+    try { if (src) src.disconnect(); } catch (e2) {}
+    return false;
+  }
+  wordSource = src;
+  src.onended = () => {
+    if (wordSource === src) wordSource = null;
+    if (token !== wordPlayToken) return;
+    if (el) el.classList.remove("on");
+  };
+  return true;
+}
+function playWord(word, el) {
+  if (!wordAudioOn()) return;
+  markBusy(400);
+  const url = wordAudioAbs(word);
+  if (!url) return;
+  const token = ++wordPlayToken;
+  clearWordHighlight();
+  if (el) el.classList.add("on");
+  try { player.pause(); } catch (e) {}
+  setListening(false);
+  stopSentenceSource();
+  stopWordSource();
+  if (playWordBuffer(url, token, el)) return;
+  // This clip is not decoded yet. Play it the old way, and decode it next.
+  const at = warmQueue.indexOf(url);
+  if (at > 0) {
+    warmQueue.splice(at, 1);
+    warmQueue.unshift(url);
+  }
+  loadBuffer(url);
+  playWordElement(url, token, el);
 }
 function sentenceWordsHTML(text) {
   const raw = String(text || "");
@@ -319,6 +487,19 @@ function masteryOf(id) {
   if (!mastery[id]) mastery[id] = { ok: 0, miss: 0, hints: 0, mastered: false, clean: false };
   return mastery[id];
 }
+let booted = false;
+let saveSoon = false;
+function saveSessionSoon() {
+  if (saveSoon) return;
+  saveSoon = true;
+  // Write after the next paint so the tile can move before localStorage blocks.
+  requestAnimationFrame(() => {
+    setTimeout(() => {
+      saveSoon = false;
+      try { saveSession(); } catch (e) {}
+    }, 0);
+  });
+}
 function saveStats() { writeJSON(STATS_KEY, stats); }
 function saveMastery() { writeJSON(MASTERY_KEY, mastery); }
 function saveSession() {
@@ -394,11 +575,47 @@ function heardLabel(kind, voice) {
 function stopPlayback() {
   playToken++;
   try { player.pause(); } catch (e) {}
+  stopSentenceSource();
   if (window.speechSynthesis) speechSynthesis.cancel();
   setListening(false);
   stopWordAudio();
 }
-function playUrl(url, start, end, token) {
+function playUrlBuffer(url, start, end, token) {
+  const buf = audioBuffers.get(url);
+  const ctx = audioContext();
+  if (!buf || !ctx) return null;
+  let src;
+  try {
+    if (ctx.state !== "running") { const r = ctx.resume(); if (r && r.catch) r.catch(() => {}); }
+    stopSentenceSource();
+    src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    const t0 = start != null && isFinite(+start) ? Math.max(0, +start) : 0;
+    const t1 = end != null && isFinite(+end) ? +end : null;
+    if (t1 != null && t1 > t0) src.start(0, t0, t1 - t0);
+    else if (t0 > 0) src.start(0, t0);
+    else src.start(0);
+  } catch (e) {
+    try { if (src) src.disconnect(); } catch (e2) {}
+    return null;
+  }
+  sentenceSource = src;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      resolve(!!ok);
+    };
+    src.onended = () => {
+      if (sentenceSource === src) sentenceSource = null;
+      if (token !== playToken) return finish(false);
+      finish(true);
+    };
+  });
+}
+function playUrlElement(url, start, end, token) {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (ok) => {
@@ -413,26 +630,35 @@ function playUrl(url, start, end, token) {
     const t1 = end != null && isFinite(+end) ? +end : null;
     const begin = () => {
       if (settled || token !== playToken) return finish(false);
-      try { el.currentTime = t0; } catch (e) {}
+      // Seeking to 0 before play delays the start. Only seek into a real clip.
+      try { if (t0 > 0) el.currentTime = t0; } catch (e) {}
       const p = el.play();
       if (p && p.catch) p.catch(() => finish(false));
     };
     el.src = url;
     if (el.readyState >= 1) begin();
     else el.addEventListener("loadedmetadata", begin, { once: true });
-    const tick = () => {
-      if (settled || token !== playToken) return;
-      if (t1 != null && el.currentTime >= t1 - 0.04 && el.currentTime > t0) {
-        try { el.pause(); } catch (e) {}
-        return finish(true);
-      }
+    if (t1 != null) {
+      const tick = () => {
+        if (settled || token !== playToken) return;
+        if (el.currentTime >= t1 - 0.04 && el.currentTime > t0) {
+          try { el.pause(); } catch (e) {}
+          return finish(true);
+        }
+        requestAnimationFrame(tick);
+      };
       requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
+    }
     setTimeout(() => {
       if (!settled && token === playToken && el.paused && (el.currentTime || 0) < 0.05) finish(false);
     }, 8000);
   });
+}
+function playUrl(url, start, end, token) {
+  const via = playUrlBuffer(url, start, end, token);
+  if (via) return via;
+  loadBuffer(url);
+  return playUrlElement(url, start, end, token);
 }
 function speak(text) {
   return new Promise((resolve) => {
@@ -454,6 +680,8 @@ function speak(text) {
 async function playSentence(sentence) {
   const token = ++playToken;
   try { player.pause(); } catch (e) {}
+  stopSentenceSource();
+  stopWordSource();
   if (window.speechSynthesis) speechSynthesis.cancel();
   const field = audioField(sentence);
   if (field && field.url) {
@@ -611,7 +839,12 @@ async function onStart() {
   const ids = list.map((s) => s.id);
   beginAt(keepOrder() ? ids : shuffle(ids), 0);
 }
-function onPlace(i) {
+function snapTile(btn) {
+  btn.classList.add("notrans");
+  // Drop the class only after the new colors have painted, or the move fades.
+  requestAnimationFrame(() => requestAnimationFrame(() => btn.classList.remove("notrans")));
+}
+function onPlace(i, btn) {
   if (!round || !round.sentence || round.phase === "correct" || round.phase === "done") return;
   i = i | 0;
   const at = round.bank.indexOf(i);
@@ -621,11 +854,22 @@ function onPlace(i) {
   round.bank.splice(at, 1);
   round.placed[slot] = i;
   if (round.phase === "wrong") round.phase = "play";
-  saveSession();
-  render();
+  const node = btn && btn.dataset && btn.dataset.act === "place" ? btn : null;
+  const empty = document.querySelector(".slots .slot");
+  if (node && empty) {
+    node.dataset.act = "unplace";
+    node.dataset.slot = String(slot);
+    node.removeAttribute("data-i");
+    snapTile(node);
+    empty.replaceWith(node);
+    saveSessionSoon();
+  } else {
+    saveSession();
+    render();
+  }
   playWord(round.sentence.tiles[i]);
 }
-function onUnplace(slot) {
+function onUnplace(slot, btn) {
   if (!round || !round.sentence || round.phase === "correct" || round.phase === "done") return;
   slot = slot | 0;
   if (slot < 0 || slot >= round.placed.length) return;
@@ -635,8 +879,23 @@ function onUnplace(slot) {
   round.placed[slot] = null;
   round.bank.push(i);
   if (round.phase === "wrong") round.phase = "play";
-  saveSession();
-  render();
+  const node = btn && btn.dataset && btn.dataset.act === "unplace" ? btn : null;
+  const bank = document.querySelector(".bank");
+  if (node && bank) {
+    const empty = document.createElement("span");
+    empty.className = "slot";
+    node.replaceWith(empty);
+    node.dataset.act = "place";
+    node.dataset.i = String(i);
+    node.removeAttribute("data-slot");
+    node.classList.remove("locked");
+    snapTile(node);
+    bank.appendChild(node);
+    saveSessionSoon();
+  } else {
+    saveSession();
+    render();
+  }
 }
 function onHint() {
   if (!round || !round.sentence || round.phase === "correct" || round.phase === "done") return;
@@ -762,6 +1021,7 @@ function audioIsPlaying() {
     try { return !!(el && !el.paused && !el.ended); } catch (e) { return false; }
   };
   if (listening) return true;
+  if (wordSource || sentenceSource) return true;
   if (playing(player) || playing(wordPlayer)) return true;
   try { if (window.speechSynthesis && speechSynthesis.speaking) return true; } catch (e) {}
   return false;
@@ -1168,12 +1428,16 @@ function dockHTML() {
   return '<button class="go" type="button" data-act="start">Start · 开始练习</button>' +
     '<button class="wide ghost" type="button" data-act="update">Check for update · 检查更新</button>';
 }
+let badgeCache = "";
 function renderBadge() {
   const host = $("today");
   if (!host) return;
   badgeDay = nyToday();
   const n = todayCount();
   const open = ui.historyOpen;
+  const badgeKey = badgeDay + "|" + n + "|" + (open ? "1" : "0");
+  if (badgeKey === badgeCache && host.firstChild) return;
+  badgeCache = badgeKey;
   const rows = last7().map((d, i) => (
     '<li class="' + (i === 0 ? "today" : "") + '"><span>' + esc(dayLabel(d.iso)) + "</span><b>" + d.n + "</b></li>"
   )).join("");
@@ -1197,6 +1461,7 @@ function render() {
   main.scrollTop = y;
   renderBadge();
   syncSettingsUI();
+  if (round && round.sentence && (ui.screen === "play" || ui.screen === "done")) warmSentence(round.sentence);
 }
 
 function restore(data) {
@@ -1307,8 +1572,8 @@ function bind() {
     }
     else if (act === "retry") onRetry();
     else if (act === "next") onNext();
-    else if (act === "place") onPlace(b.dataset.i);
-    else if (act === "unplace") onUnplace(b.dataset.slot);
+    else if (act === "place") onPlace(b.dataset.i, b);
+    else if (act === "unplace") onUnplace(b.dataset.slot, b);
     else if (act === "replay") {
       if (round && round.sentence) {
         const s = round.sentence;
@@ -1341,6 +1606,12 @@ function registerSW() {
 }
 async function boot() {
   bind();
+  document.addEventListener("pointerdown", unlockAudio, { capture: true, passive: true });
+  const flushSession = () => { if (booted) { try { saveSession(); } catch (e) {} } };
+  window.addEventListener("pagehide", flushSession);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushSession();
+  });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closeSettings();
   });
@@ -1382,6 +1653,7 @@ async function boot() {
   mastery = readJSON(MASTERY_KEY) || {};
   const saved = readJSON(SESSION_KEY);
   if (saved) restore(saved);
+  booted = true;
   render();
   try {
     const updatedTo = sessionStorage.getItem("puzzle_updated");

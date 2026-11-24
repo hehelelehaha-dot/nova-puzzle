@@ -523,6 +523,8 @@ html[data-theme="dark"] .listen.playing {
   max-width: 100%;
   overflow-wrap: anywhere;
 }
+/* Snap a moved tile into its new colors. A transition here reads as lag. */
+.tile.notrans { transition: none; }
 .slots .tile {
   background: var(--card);
   box-shadow: var(--shadow-tile);
@@ -972,7 +974,7 @@ html[data-theme="dark"] .settings-sheet { box-shadow: 0 -12px 40px rgba(0, 0, 0,
 }
 
 
-button, .tile, label[data-hx] { touch-action: manipulation; }
+button, .tile, label[data-hx] { touch-action: manipulation; position: relative; }
 
 /* Interview: the interviewer's question above the puzzle */
 .ask {
