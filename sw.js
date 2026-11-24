@@ -1,7 +1,7 @@
 // Sentence Puzzle service worker. Register with scope "./".
 // Cache name is unique to this app. Version must match meta.json "v".
 // Shell lives in a versioned cache; audio lives in a long-lived cache.
-const V = "13";
+const V = "14";
 const PREFIX = "sentence-puzzle-";
 const SHELL = PREFIX + V;
 const MEDIA = PREFIX + "audio";
