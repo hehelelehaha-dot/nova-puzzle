@@ -3,7 +3,7 @@
 // Playback: sentence.audio (Fish voice-over), then oa (original), then a (Kokoro), then Web Speech.
 // Naval sentences come from naval.json. Scary and Naval mp3s live under audio/ and are cached on first play.
 
-const VERSION_FALLBACK = "13";
+const VERSION_FALLBACK = "14";
 const STATS_KEY = "puzzle_stats";
 const MASTERY_KEY = "puzzle_mastery";
 const SESSION_KEY = "puzzle_session";
@@ -517,6 +517,7 @@ function saveSession() {
       id: round.sentence ? round.sentence.id : null,
       placed: round.placed,
       bank: round.bank,
+      bankLayout: round.bankLayout || null,
       locked: round.locked,
       phase: round.phase,
       hints: round.hints,
@@ -797,6 +798,32 @@ function sane(sentence, placed, bank, locked) {
   }
   return seen.size === n;
 }
+function bankLayoutFor(sentence, placed, bank, saved) {
+  const n = sentence.tiles.length;
+  if (Array.isArray(saved) && saved.length === n) {
+    const seen = new Set();
+    let good = true;
+    for (let i = 0; i < n; i++) {
+      const p = saved[i];
+      if (p !== (p | 0) || p < 0 || p >= n || seen.has(p)) { good = false; break; }
+      seen.add(p | 0);
+    }
+    if (good) return saved.map((x) => x | 0);
+  }
+  const out = [];
+  const seen = new Set();
+  const push = (p) => {
+    if (p == null) return;
+    p = p | 0;
+    if (p < 0 || p >= n || seen.has(p)) return;
+    seen.add(p);
+    out.push(p);
+  };
+  (bank || []).forEach(push);
+  (placed || []).forEach(push);
+  for (let i = 0; i < n; i++) push(i);
+  return out;
+}
 function beginAt(queue, index) {
   if (index >= queue.length) {
     round = {
@@ -812,11 +839,13 @@ function beginAt(queue, index) {
   }
   const sentence = findSentence(queue[index]);
   if (!sentence) { beginAt(queue, index + 1); return; }
+  const dealt = dealTiles(sentence);
   round = {
     theme: ui.theme, level: ui.level, board: ui.board,
     queue: queue, index: index, sentence: sentence,
     placed: Array(sentence.tiles.length).fill(null),
-    bank: dealTiles(sentence),
+    bank: dealt.slice(),
+    bankLayout: dealt.slice(),
     locked: Array(sentence.tiles.length).fill(false),
     phase: "play", hints: 0, scored: false, misses: 0, heard: "", showZh: false, feedback: ""
   };
@@ -856,12 +885,14 @@ function onPlace(i, btn) {
   if (round.phase === "wrong") round.phase = "play";
   const node = btn && btn.dataset && btn.dataset.act === "place" ? btn : null;
   const empty = document.querySelector(".slots .slot");
-  if (node && empty) {
+  const hold = node && node.parentElement && node.parentElement.classList.contains("bank-hold") ? node.parentElement : null;
+  if (node && empty && hold) {
     node.dataset.act = "unplace";
     node.dataset.slot = String(slot);
     node.removeAttribute("data-i");
     snapTile(node);
     empty.replaceWith(node);
+    hold.classList.add("open");
     saveSessionSoon();
   } else {
     saveSession();
@@ -880,8 +911,8 @@ function onUnplace(slot, btn) {
   round.bank.push(i);
   if (round.phase === "wrong") round.phase = "play";
   const node = btn && btn.dataset && btn.dataset.act === "unplace" ? btn : null;
-  const bank = document.querySelector(".bank");
-  if (node && bank) {
+  const hold = document.querySelector('.bank-hold[data-hold="' + i + '"]');
+  if (node && hold) {
     const empty = document.createElement("span");
     empty.className = "slot";
     node.replaceWith(empty);
@@ -890,7 +921,8 @@ function onUnplace(slot, btn) {
     node.removeAttribute("data-slot");
     node.classList.remove("locked");
     snapTile(node);
-    bank.appendChild(node);
+    hold.appendChild(node);
+    hold.classList.remove("open");
     saveSessionSoon();
   } else {
     saveSession();
@@ -1383,9 +1415,17 @@ function playMain() {
     const cls = "tile" + (locked ? " locked" : "");
     return '<button type="button" class="' + cls + '" data-act="unplace" data-slot="' + pos + '">' + esc(word) + "</button>";
   }).join("");
-  const bank = round.bank.map((index) => (
-    '<button type="button" class="tile" data-act="place" data-i="' + index + '">' + esc(s.tiles[index]) + "</button>"
-  )).join("");
+  const inBank = new Set(round.bank);
+  const layout = round.bankLayout && round.bankLayout.length === s.tiles.length ? round.bankLayout : round.bank;
+  const bank = layout.map((index) => {
+    const word = esc(s.tiles[index]);
+    const here = inBank.has(index);
+    const btn = here
+      ? '<button type="button" class="tile" data-act="place" data-i="' + index + '">' + word + "</button>"
+      : "";
+    return '<span class="bank-hold' + (here ? "" : " open") + '" data-hold="' + index + '">' +
+      '<span class="bank-sizer" aria-hidden="true">' + word + "</span>" + btn + "</span>";
+  }).join("");
   const zhOpen = !!round.showZh;
   const zhText = s.chinese || s.zh || "";
   const meaning = '<div class="meaning"><button type="button" class="meaning-btn" data-act="zh" aria-expanded="' +
@@ -1476,6 +1516,7 @@ function restore(data) {
   if (sentence) {
     const board = migrateBoard(sentence, saved.placed || [], saved.bank || [], saved.locked);
     if (!sane(sentence, board.placed, board.bank, board.locked)) {
+      const redealt = dealTiles(sentence);
       round = {
         theme: saved.theme || ui.theme,
         level: saved.level || ui.level,
@@ -1484,7 +1525,8 @@ function restore(data) {
         index: saved.index | 0,
         sentence: sentence,
         placed: Array(sentence.tiles.length).fill(null),
-        bank: dealTiles(sentence),
+        bank: redealt.slice(),
+        bankLayout: redealt.slice(),
         locked: Array(sentence.tiles.length).fill(false),
         phase: saved.scored ? "correct" : "play",
         hints: saved.hints | 0,
@@ -1504,6 +1546,7 @@ function restore(data) {
         sentence: sentence,
         placed: board.placed,
         bank: board.bank,
+        bankLayout: bankLayoutFor(sentence, board.placed, board.bank, saved.bankLayout),
         locked: board.locked,
         phase: phase,
         hints: saved.hints | 0,
@@ -1523,6 +1566,7 @@ function restore(data) {
       sentence: sentence,
       placed: saved.placed || [],
       bank: saved.bank || [],
+      bankLayout: saved.bankLayout || null,
       locked: Array.isArray(saved.locked) ? saved.locked : [],
       phase: saved.phase || "play",
       hints: saved.hints | 0,

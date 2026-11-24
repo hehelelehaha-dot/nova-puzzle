@@ -506,22 +506,40 @@ html[data-theme="dark"] .listen.playing {
   background: var(--chip);
 }
 
-.tile {
+/* Each bank word keeps its own cell. Placing the word leaves the cell behind,
+   so the words around it do not slide over. */
+.bank-hold {
+  display: grid;
+  flex: 0 0 auto;
+  max-width: 100%;
+  border-radius: 14px;
+}
+.bank-hold.open { background: var(--chip); }
+.bank-hold > .bank-sizer,
+.bank-hold > button.tile { grid-area: 1 / 1; }
+.bank-sizer {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.tile, .bank-sizer {
   min-height: 42px;
   padding: 9px 14px;
   border-radius: 14px;
-  background: var(--chip);
-  color: var(--ink);
   border: 0;
   font-family: var(--en);
   font-size: 17px;
   font-weight: 560;
   line-height: 1.2;
   letter-spacing: -0.01em;
-  box-shadow: none;
-  touch-action: manipulation;
   max-width: 100%;
   overflow-wrap: anywhere;
+}
+.tile {
+  background: var(--chip);
+  color: var(--ink);
+  box-shadow: none;
+  touch-action: manipulation;
 }
 /* Snap a moved tile into its new colors. A transition here reads as lag. */
 .tile.notrans { transition: none; }
