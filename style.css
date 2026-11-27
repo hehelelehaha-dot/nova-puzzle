@@ -1046,3 +1046,101 @@ main.arrange .ask { flex-shrink: 0; }
   line-height: 1.5;
   color: var(--mut);
 }
+
+/* ===== Touch feel (v15), modelled on Word Atlas =====
+   Visual only. No content, layout data or tap logic changes.
+   1. Presses spring back instead of easing linearly.
+   2. Word tiles and choice cards have a key-like lower edge that sinks when pressed.
+   3. Keyboard focus shows a clear ring; reduced-motion turns the motion off. */
+:root {
+  --spring: cubic-bezier(0.34, 1.4, 0.5, 1);
+  --edge: rgba(22, 26, 44, .10);
+  --edge-strong: rgba(22, 26, 44, .16);
+}
+html[data-theme="dark"] {
+  --edge: rgba(0, 0, 0, .35);
+  --edge-strong: rgba(0, 0, 0, .5);
+}
+button, [role="button"], summary { -webkit-user-select: none; user-select: none; }
+button {
+  transition:
+    transform .25s var(--spring),
+    background-color .2s var(--ease),
+    color .2s var(--ease),
+    box-shadow .2s var(--ease),
+    opacity .2s var(--ease);
+}
+button:not(:disabled):active { transform: scale(0.97); }
+.gear:not(:disabled):active,
+.listen:not(:disabled):active,
+.ask-play:not(:disabled):active,
+.back:not(:disabled):active { transform: scale(0.92); }
+
+/* Large actions: a soft drop shadow under the primary button, like a raised key. */
+.go, .btn.primary, .wide.primary {
+  box-shadow: 0 10px 22px -12px rgba(177, 64, 39, .7), inset 0 1px 0 rgba(255, 255, 255, .14);
+}
+html[data-theme="dark"] .go,
+html[data-theme="dark"] .btn.primary,
+html[data-theme="dark"] .wide.primary {
+  box-shadow: 0 10px 22px -12px rgba(0, 0, 0, .8);
+}
+.go:not(:disabled):active, .btn.primary:not(:disabled):active, .wide.primary:not(:disabled):active {
+  box-shadow: 0 4px 10px -8px rgba(177, 64, 39, .6);
+}
+
+/* Word tiles: a 3px lower edge drawn with an inset shadow, so tile size (and the
+   bank-sizer cells that hold the layout still) do not change. */
+.tile {
+  box-shadow: inset 0 -3px 0 var(--edge);
+  transition: transform .2s var(--spring), box-shadow .12s var(--ease);
+}
+.slots .tile {
+  box-shadow: inset 0 -3px 0 var(--edge), var(--shadow-tile);
+}
+.tile:not(:disabled):active {
+  transform: translateY(1.5px);
+  box-shadow: inset 0 -1px 0 var(--edge);
+}
+.tile.wrong, .tile.locked { box-shadow: inset 0 -3px 0 rgba(0, 0, 0, .12); }
+.tile.notrans { transition: none; }
+
+/* Theme chips, levels and boards: same lower edge, selected state sits flat. */
+.chip, .lv, .board, .theme-pick {
+  box-shadow: inset 0 -2px 0 var(--edge);
+}
+.chip:not(:disabled):active, .lv:not(:disabled):active, .board:not(:disabled):active, .theme-pick:not(:disabled):active {
+  transform: translateY(1px) scale(0.98);
+  box-shadow: inset 0 0 0 transparent;
+}
+.chip.on, .lv.on, .board.on, .theme-pick.on { box-shadow: 0 6px 14px -8px rgba(22, 26, 44, .55); }
+html[data-theme="dark"] .chip.on,
+html[data-theme="dark"] .lv.on,
+html[data-theme="dark"] .board.on,
+html[data-theme="dark"] .theme-pick.on { box-shadow: none; }
+
+/* Hint / next-word and other chip-coloured buttons. */
+.btn.ghost, .wide.ghost, .replay, #today-badge {
+  box-shadow: inset 0 -2px 0 var(--edge);
+}
+.btn.ghost:not(:disabled):active, .wide.ghost:not(:disabled):active, .replay:not(:disabled):active {
+  box-shadow: inset 0 0 0 transparent;
+}
+
+/* Keyboard focus. */
+button:focus { outline: none; }
+button:focus-visible, summary:focus-visible, input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* Keep the dock visually separate from content scrolling underneath it. */
+#dock { background: linear-gradient(to bottom, transparent, var(--bg) 10px); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
