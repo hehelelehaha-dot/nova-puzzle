@@ -1,7 +1,7 @@
 // Sentence Puzzle service worker. Register with scope "./".
 // Cache name is unique to this app. Version must match meta.json "v".
 // Shell lives in a versioned cache; audio lives in a long-lived cache.
-const V = "16";
+const V = "17";
 const PREFIX = "sentence-puzzle-";
 const SHELL = PREFIX + V;
 const MEDIA = PREFIX + "audio";
@@ -77,6 +77,25 @@ async function evictCachedWords() {
       try {
         const u = new URL(req.url);
         if (u.pathname.includes("/words/")) return media.delete(req);
+      } catch (e) {}
+      return Promise.resolve(false);
+    }));
+  } catch (e) {}
+}
+
+// Interview clips used to be rewritten in place (same URL, new bytes). The
+// media cache is long-lived and cache-first, so phones kept the old mp3.
+// v17 lives under /audio/interview/v17/; drop any older interview URLs.
+async function evictStaleInterview() {
+  try {
+    const media = await caches.open(MEDIA);
+    const keys = await media.keys();
+    await Promise.all(keys.map((req) => {
+      try {
+        const u = new URL(req.url);
+        if (u.pathname.includes("/audio/interview/") && !u.pathname.includes("/audio/interview/v17/")) {
+          return media.delete(req);
+        }
       } catch (e) {}
       return Promise.resolve(false);
     }));
@@ -191,6 +210,7 @@ self.addEventListener("activate", (event) => {
         }
       }
       await evictCachedWords();
+      await evictStaleInterview();
     } catch (err) {}
     await self.clients.claim();
   })());
